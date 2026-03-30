@@ -6,7 +6,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'features/auth/rider_login_screen.dart';
 import 'features/home/rider_dashboard.dart';
 
-// TODO: Replace with your credentials
+
 const String supabaseUrl = 'https://xxvicmprwtbxinuluyqx.supabase.co';
 const String supabaseAnonKey = 'sb_publishable_RGFSfrrMcY-uqQrFxNCNaw_Z6D6Jmo2';
 
