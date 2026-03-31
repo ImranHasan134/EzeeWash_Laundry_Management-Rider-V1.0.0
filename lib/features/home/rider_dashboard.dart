@@ -1,17 +1,23 @@
 // lib/features/home/rider_dashboard.dart
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:geolocator/geolocator.dart';
+import 'package:url_launcher/url_launcher.dart';
+
 import '../../main.dart';
 import '../auth/rider_login_screen.dart';
+import '../orders/screens/rider_order_details_screen.dart';
+import 'package:onesignal_flutter/onesignal_flutter.dart';
 
 class RiderDashboard extends StatefulWidget {
   const RiderDashboard({super.key});
   @override State<RiderDashboard> createState() => _RiderDashboardState();
 }
 
-class _RiderDashboardState extends State<RiderDashboard> {
+class _RiderDashboardState extends State<RiderDashboard> with WidgetsBindingObserver {
   int _currentIndex = 0;
   String _riderId = '';
   Map<String, dynamic>? _riderProfile;
@@ -23,8 +29,8 @@ class _RiderDashboardState extends State<RiderDashboard> {
   List<Map<String, dynamic>> _historyOrders = [];
 
   RealtimeChannel? _channel;
+  StreamSubscription<Position>? _positionStream;
 
-  // Theme Colors for easy reference
   final Color _primaryBlue = const Color(0xFF3B82F6);
   final Color _bgColor = const Color(0xFFF8FAFC);
   final Color _textColor = const Color(0xFF1E293B);
@@ -33,13 +39,39 @@ class _RiderDashboardState extends State<RiderDashboard> {
   @override
   void initState() {
     super.initState();
+    // 2. Register the Observer
+    WidgetsBinding.instance.addObserver(this);
     _initDashboard();
+
+    // 3. Listen for Notification Taps
+    OneSignal.Notifications.addClickListener((event) {
+      if (mounted) {
+        _fetchRiderProfile();
+        _fetchOrders();
+      }
+    });
   }
 
   @override
   void dispose() {
+    // 4. Remove the Observer when closing
+    WidgetsBinding.instance.removeObserver(this);
     _channel?.unsubscribe();
+    _positionStream?.cancel();
     super.dispose();
+  }
+
+  // 5. THIS IS THE MAGIC AUTO-REFRESH FUNCTION
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      // The app just came back to the foreground! Refresh instantly.
+      debugPrint("App Resumed: Auto-refreshing data...");
+      if (mounted && _riderId.isNotEmpty) {
+        _fetchRiderProfile();
+        _fetchOrders();
+      }
+    }
   }
 
   Future<void> _initDashboard() async {
@@ -51,13 +83,110 @@ class _RiderDashboardState extends State<RiderDashboard> {
       return;
     }
 
+    // FIREBASE COMPLETELY REMOVED FROM HERE!
+
     await Future.wait([
       _fetchRiderProfile(),
       _fetchOrders(),
     ]);
 
     _setupRealtime();
+
+    if (_isOnline) {
+      _startLocationTracking();
+    }
   }
+
+  // ─── GPS TRACKING & NAVIGATION LOGIC ──────────────────────────────────────
+
+  Future<bool> _handleLocationPermission() async {
+    bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
+    if (!serviceEnabled) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Location services are disabled.')));
+      return false;
+    }
+    LocationPermission permission = await Geolocator.checkPermission();
+    if (permission == LocationPermission.denied) {
+      permission = await Geolocator.requestPermission();
+      if (permission == LocationPermission.denied) {
+        if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Location permissions are denied.')));
+        return false;
+      }
+    }
+    if (permission == LocationPermission.deniedForever) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Location permissions are permanently denied.')));
+      return false;
+    }
+    return true;
+  }
+
+  void _startLocationTracking() async {
+    final hasPermission = await _handleLocationPermission();
+    if (!hasPermission) {
+      setState(() => _isOnline = false);
+      return;
+    }
+
+    _positionStream = Geolocator.getPositionStream(
+      locationSettings: const LocationSettings(accuracy: LocationAccuracy.high, distanceFilter: 10),
+    ).listen((Position position) {
+      _updateLiveLocationInDb(position);
+    });
+  }
+
+  void _stopLocationTracking() {
+    _positionStream?.cancel();
+    _positionStream = null;
+  }
+
+  Future<void> _updateLiveLocationInDb(Position position) async {
+    if (_activeOrders.isEmpty) return;
+
+    try {
+      for (var order in _activeOrders) {
+        final existing = await supabase.from('rider_locations').select('id').eq('order_id', order['id']).maybeSingle();
+
+        if (existing != null) {
+          await supabase.from('rider_locations').update({
+            'latitude': position.latitude,
+            'longitude': position.longitude,
+            'updated_at': DateTime.now().toIso8601String(),
+          }).eq('id', existing['id']);
+        } else {
+          await supabase.from('rider_locations').insert({
+            'rider_id': _riderId,
+            'order_id': order['id'],
+            'latitude': position.latitude,
+            'longitude': position.longitude,
+          });
+        }
+      }
+    } catch (e) {
+      debugPrint('Error pushing live location: $e');
+    }
+  }
+
+  Future<void> _openGoogleMaps(Map<String, dynamic> order) async {
+    final lat = order['latitude'] ?? order['pickup_lat'];
+    final lng = order['longitude'] ?? order['pickup_lng'];
+    final address = order['pickup_address'] ?? '';
+
+    Uri url;
+    if (lat != null && lng != null) {
+      url = Uri.parse('https://www.google.com/maps/search/?api=1&query=$lat,$lng');
+    } else {
+      final encodedAddress = Uri.encodeComponent(address);
+      url = Uri.parse('https://www.google.com/maps/search/?api=1&query=$encodedAddress');
+    }
+
+    try {
+      await launchUrl(url, mode: LaunchMode.externalApplication);
+    } catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Could not open Maps.')));
+    }
+  }
+
+  // ─── DATA FETCHING & UPDATES ───────────────────────────────────────────────
 
   Future<void> _fetchRiderProfile() async {
     try {
@@ -98,6 +227,10 @@ class _RiderDashboardState extends State<RiderDashboard> {
 
           _loading = false;
         });
+
+        if (_isOnline && _activeOrders.isNotEmpty) {
+          Geolocator.getCurrentPosition().then((pos) => _updateLiveLocationInDb(pos));
+        }
       }
     } catch (e) {
       debugPrint('Error fetching orders: $e');
@@ -106,34 +239,100 @@ class _RiderDashboardState extends State<RiderDashboard> {
   }
 
   void _setupRealtime() {
-    _channel = supabase.channel('public:orders:rider_$_riderId')
+    _channel = supabase.channel('public:orders')
         .onPostgresChanges(
         event: PostgresChangeEvent.all,
         schema: 'public',
         table: 'orders',
         callback: (payload) {
+          if (payload.newRecord != null) {
+            final newRecord = payload.newRecord!;
+
+            final rId = newRecord['rider_id']?.toString() ?? '';
+            final pId = newRecord['pickup_rider_id']?.toString() ?? '';
+            final dId = newRecord['delivery_rider_id']?.toString() ?? '';
+
+            final isMine = (rId == _riderId || pId == _riderId || dId == _riderId);
+            final status = newRecord['status']?.toString().toLowerCase() ?? '';
+
+            if (isMine && (status == 'picked_up' || status == 'out_for_delivery')) {
+              if (mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: Text('🏍️ New Task Assigned: ${newRecord['order_number']?.toString() ?? 'Update'}'),
+                    backgroundColor: Colors.green.shade700,
+                    behavior: SnackBarBehavior.floating,
+                    duration: const Duration(seconds: 4),
+                  ),
+                );
+              }
+            }
+          }
           _fetchOrders();
         }
     ).subscribe();
   }
 
   Future<void> _toggleOnlineStatus(bool value) async {
+    if (value) {
+      bool hasPerm = await _handleLocationPermission();
+      if (!hasPerm) return;
+    }
+
     setState(() => _isOnline = value);
+
     try {
       await supabase.from('riders').update({'is_online': value}).eq('id', _riderId);
+
+      if (value) {
+        _startLocationTracking();
+      } else {
+        _stopLocationTracking();
+      }
     } catch (e) {
       setState(() => _isOnline = !value);
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Failed to update status')));
     }
   }
 
-  Future<void> _updateOrderStatus(String orderId, String newStatus, double progress) async {
+  Future<void> _updateOrderStatus(Map<String, dynamic> order, String newStatus, double progress) async {
     try {
-      await supabase.from('orders').update({'status': newStatus, 'progress': progress}).eq('id', orderId);
+      final orderId = order['id'];
+      final now = DateTime.now();
+
+      final dateStr = "${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}";
+      int hour = now.hour;
+      final amPm = hour >= 12 ? 'PM' : 'AM';
+      if (hour > 12) hour -= 12;
+      if (hour == 0) hour = 12;
+      final timeStr = "${hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')} $amPm";
+
+      Map<String, dynamic> updates = {
+        'status': newStatus,
+        'progress': progress,
+        'updated_at': now.toIso8601String(),
+      };
+
+      if (newStatus == 'in_process') {
+        updates['pickup_date'] = dateStr;
+        updates['pickup_time'] = timeStr;
+      } else if (newStatus == 'delivered') {
+        updates['delivery_date'] = dateStr;
+        updates['delivery_time'] = timeStr;
+      }
+
+      await supabase.from('orders').update(updates).eq('id', orderId);
 
       if (newStatus == 'delivered' && _riderProfile != null) {
         final currentTrips = _riderProfile!['total_trips'] as int? ?? 0;
-        await supabase.from('riders').update({'total_trips': currentTrips + 1}).eq('id', _riderId);
+        final currentCash = (_riderProfile!['cash_in_hand'] as num?)?.toDouble() ?? 0.0;
+        final orderPrice = (order['total_price'] as num?)?.toDouble() ?? 0.0;
+
+        await supabase.from('riders').update({
+          'total_trips': currentTrips + 1,
+          'cash_in_hand': currentCash + orderPrice,
+        }).eq('id', _riderId);
+
         _fetchRiderProfile();
       }
 
@@ -144,6 +343,7 @@ class _RiderDashboardState extends State<RiderDashboard> {
   }
 
   Future<void> _logout() async {
+    _stopLocationTracking();
     if (_riderId.isNotEmpty) {
       await supabase.from('riders').update({'is_online': false}).eq('id', _riderId);
     }
@@ -152,53 +352,52 @@ class _RiderDashboardState extends State<RiderDashboard> {
     if (mounted) Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const RiderLoginScreen()));
   }
 
+  // ─── MAIN BUILDER ──────────────────────────────────────────────────────────
+
   @override
   Widget build(BuildContext context) {
     if (_riderProfile == null && _loading) {
       return Scaffold(backgroundColor: _bgColor, body: Center(child: CircularProgressIndicator(color: _primaryBlue)));
     }
 
-    final pages = [
-      _buildActiveTasksTab(),
-      _buildHistoryTab(),
-      _buildProfileTab(),
-    ];
-
-    // Get first name for greeting
+    final pages = [_buildActiveTasksTab(), _buildHistoryTab(), _buildProfileTab()];
     final fullName = _riderProfile?['full_name'] ?? 'Rider';
     final firstName = fullName.split(' ').first;
 
     return Scaffold(
       backgroundColor: _bgColor,
       appBar: AppBar(
-        backgroundColor: Colors.white,
-        elevation: 0,
-        scrolledUnderElevation: 0,
+        backgroundColor: Colors.white, elevation: 0, scrolledUnderElevation: 0,
         title: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Text(_currentIndex == 0 ? 'Hello, $firstName 👋' : _currentIndex == 1 ? 'Delivery History' : 'My Profile',
               style: GoogleFonts.alexandria(fontSize: 20, fontWeight: FontWeight.bold, color: _textColor)),
-          if (_currentIndex == 0)
-            Text('Here are your active assignments', style: GoogleFonts.alexandria(fontSize: 12, color: _subtextColor)),
+          if (_currentIndex == 0) Text('Here are your active assignments', style: GoogleFonts.alexandria(fontSize: 12, color: _subtextColor)),
         ]),
+        actions: [
+          Container(
+            margin: const EdgeInsets.only(right: 8),
+            decoration: BoxDecoration(color: Colors.grey.shade50, shape: BoxShape.circle),
+            child: IconButton(
+              icon: Icon(Icons.refresh_rounded, color: _primaryBlue),
+              tooltip: 'Refresh Data',
+              onPressed: () {
+                _fetchRiderProfile();
+                _fetchOrders();
+              },
+            ),
+          ),
+        ],
       ),
       body: pages[_currentIndex],
       bottomNavigationBar: Container(
-        decoration: BoxDecoration(
-          color: Colors.white,
-          boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.04), blurRadius: 20, offset: const Offset(0, -5))],
-        ),
+        decoration: BoxDecoration(color: Colors.white, boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.04), blurRadius: 20, offset: const Offset(0, -5))]),
         child: SafeArea(
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
             child: BottomNavigationBar(
-              currentIndex: _currentIndex,
-              onTap: (i) => setState(() => _currentIndex = i),
-              backgroundColor: Colors.white,
-              elevation: 0,
-              selectedItemColor: _primaryBlue,
-              unselectedItemColor: Colors.grey.shade400,
-              selectedLabelStyle: GoogleFonts.alexandria(fontSize: 12, fontWeight: FontWeight.w700),
-              unselectedLabelStyle: GoogleFonts.alexandria(fontSize: 12, fontWeight: FontWeight.w500),
+              currentIndex: _currentIndex, onTap: (i) => setState(() => _currentIndex = i),
+              backgroundColor: Colors.white, elevation: 0, selectedItemColor: _primaryBlue, unselectedItemColor: Colors.grey.shade400,
+              selectedLabelStyle: GoogleFonts.alexandria(fontSize: 12, fontWeight: FontWeight.w700), unselectedLabelStyle: GoogleFonts.alexandria(fontSize: 12, fontWeight: FontWeight.w500),
               type: BottomNavigationBarType.fixed,
               items: const [
                 BottomNavigationBarItem(icon: Padding(padding: EdgeInsets.only(bottom: 4), child: Icon(Icons.two_wheeler_rounded, size: 24)), label: 'Tasks'),
@@ -212,51 +411,37 @@ class _RiderDashboardState extends State<RiderDashboard> {
     );
   }
 
-  // ─── TAB 1: ACTIVE TASKS ───────────────────────────────────────────────────
+  // ─── UI TABS ───────────────────────────────────────────────────────────────
+
   Widget _buildActiveTasksTab() {
     return Column(children: [
-      // Polished Toggle Card
       Container(
-        margin: const EdgeInsets.fromLTRB(20, 20, 20, 10),
-        padding: const EdgeInsets.all(20),
+        margin: const EdgeInsets.fromLTRB(20, 20, 20, 10), padding: const EdgeInsets.all(20),
         decoration: BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.circular(20),
+          color: Colors.white, borderRadius: BorderRadius.circular(20),
           border: Border.all(color: _isOnline ? Colors.green.withOpacity(0.3) : Colors.grey.shade200),
           boxShadow: [BoxShadow(color: (_isOnline ? Colors.green : Colors.black).withOpacity(0.04), blurRadius: 20, offset: const Offset(0, 8))],
         ),
         child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
           Row(children: [
-            Container(
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(color: (_isOnline ? Colors.green : Colors.grey).withOpacity(0.1), shape: BoxShape.circle),
-              child: Icon(Icons.power_settings_new_rounded, color: _isOnline ? Colors.green : Colors.grey.shade500),
-            ),
+            Container(padding: const EdgeInsets.all(12), decoration: BoxDecoration(color: (_isOnline ? Colors.green : Colors.grey).withOpacity(0.1), shape: BoxShape.circle), child: Icon(Icons.power_settings_new_rounded, color: _isOnline ? Colors.green : Colors.grey.shade500)),
             const SizedBox(width: 16),
             Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text('Current Status', style: GoogleFonts.alexandria(fontSize: 13, color: _subtextColor, fontWeight: FontWeight.w500)),
-              const SizedBox(height: 4),
-              Text(_isOnline ? 'Online & Ready' : 'You are Offline',
-                  style: GoogleFonts.alexandria(fontSize: 16, fontWeight: FontWeight.bold, color: _isOnline ? Colors.green.shade700 : _textColor)),
+              Text('Current Status', style: GoogleFonts.alexandria(fontSize: 13, color: _subtextColor, fontWeight: FontWeight.w500)), const SizedBox(height: 4),
+              Text(_isOnline ? 'Online & Ready' : 'You are Offline', style: GoogleFonts.alexandria(fontSize: 16, fontWeight: FontWeight.bold, color: _isOnline ? Colors.green.shade700 : _textColor)),
             ]),
           ]),
           Switch.adaptive(value: _isOnline, activeColor: Colors.green, onChanged: _toggleOnlineStatus),
         ]),
       ),
-
       Expanded(
-        child: _loading
-            ? Center(child: CircularProgressIndicator(color: _primaryBlue))
-            : _activeOrders.isEmpty
-            ? _buildEmptyState('No active tasks', _isOnline ? 'Searching for nearby orders...' : 'Go online to receive tasks.', Icons.task_alt_rounded)
+        child: _loading ? Center(child: CircularProgressIndicator(color: _primaryBlue))
+            : _activeOrders.isEmpty ? _buildEmptyState('No active tasks', _isOnline ? 'Searching for nearby orders...' : 'Go online to receive tasks.', Icons.task_alt_rounded)
             : RefreshIndicator(
-          onRefresh: _fetchOrders,
-          color: _primaryBlue,
+          onRefresh: _fetchOrders, color: _primaryBlue,
           child: ListView.separated(
-            padding: const EdgeInsets.fromLTRB(20, 10, 20, 24),
-            physics: const AlwaysScrollableScrollPhysics(),
-            itemCount: _activeOrders.length,
-            separatorBuilder: (_, __) => const SizedBox(height: 16),
+            padding: const EdgeInsets.fromLTRB(20, 10, 20, 24), physics: const AlwaysScrollableScrollPhysics(),
+            itemCount: _activeOrders.length, separatorBuilder: (_, __) => const SizedBox(height: 16),
             itemBuilder: (_, i) => _buildActiveOrderCard(_activeOrders[i]),
           ),
         ),
@@ -264,15 +449,11 @@ class _RiderDashboardState extends State<RiderDashboard> {
     ]);
   }
 
-  // ─── TAB 2: HISTORY ────────────────────────────────────────────────────────
   Widget _buildHistoryTab() {
-    return _loading
-        ? Center(child: CircularProgressIndicator(color: _primaryBlue))
-        : _historyOrders.isEmpty
-        ? _buildEmptyState('No history yet', 'Your completed deliveries will appear here.', Icons.receipt_long_rounded)
+    return _loading ? Center(child: CircularProgressIndicator(color: _primaryBlue))
+        : _historyOrders.isEmpty ? _buildEmptyState('No history yet', 'Your completed deliveries will appear here.', Icons.receipt_long_rounded)
         : RefreshIndicator(
-      onRefresh: _fetchOrders,
-      color: _primaryBlue,
+      onRefresh: _fetchOrders, color: _primaryBlue,
       child: ListView.separated(
         padding: const EdgeInsets.all(20), physics: const AlwaysScrollableScrollPhysics(),
         itemCount: _historyOrders.length, separatorBuilder: (_, __) => const SizedBox(height: 12),
@@ -281,75 +462,64 @@ class _RiderDashboardState extends State<RiderDashboard> {
     );
   }
 
-  // ─── TAB 3: PROFILE ────────────────────────────────────────────────────────
   Widget _buildProfileTab() {
     final name = _riderProfile?['full_name'] ?? 'Rider';
     final phone = _riderProfile?['phone'] ?? '—';
     final vehiclePlate = _riderProfile?['vehicle_plate'] ?? '—';
     final trips = _riderProfile?['total_trips']?.toString() ?? '0';
     final rating = (_riderProfile?['rating'] as num?)?.toDouble().toStringAsFixed(1) ?? '5.0';
+    final cashInHand = (_riderProfile?['cash_in_hand'] as num?)?.toDouble() ?? 0.0;
     final avatar = _riderProfile?['avatar_url'] as String?;
 
     return SingleChildScrollView(
       padding: const EdgeInsets.all(24),
       child: Column(children: [
-        // Profile Header Card
+        Container(
+          width: double.infinity, padding: const EdgeInsets.all(24),
+          decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(24), boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.03), blurRadius: 20, offset: const Offset(0, 10))]),
+          child: Column(children: [
+            Container(decoration: BoxDecoration(shape: BoxShape.circle, border: Border.all(color: _primaryBlue.withOpacity(0.2), width: 4)), child: CircleAvatar(radius: 46, backgroundColor: _primaryBlue.withOpacity(0.1), backgroundImage: (avatar != null && avatar.isNotEmpty) ? NetworkImage(avatar) : null, child: (avatar == null || avatar.isEmpty) ? Text(name[0].toUpperCase(), style: GoogleFonts.alexandria(fontSize: 32, fontWeight: FontWeight.bold, color: _primaryBlue)) : null)),
+            const SizedBox(height: 16), Text(name, style: GoogleFonts.alexandria(fontSize: 22, fontWeight: FontWeight.bold, color: _textColor)), const SizedBox(height: 4), Text(phone, style: GoogleFonts.alexandria(fontSize: 14, color: _subtextColor)), const SizedBox(height: 12),
+            Container(padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6), decoration: BoxDecoration(color: Colors.grey.shade100, borderRadius: BorderRadius.circular(20)), child: Text('Plate: $vehiclePlate', style: GoogleFonts.alexandria(fontSize: 12, fontWeight: FontWeight.w600, color: _textColor)))
+          ]),
+        ),
+
+        const SizedBox(height: 24),
+
+        // WALLET CARD
         Container(
           width: double.infinity,
           padding: const EdgeInsets.all(24),
           decoration: BoxDecoration(
-            color: Colors.white,
+            gradient: const LinearGradient(colors: [Color(0xFF10B981), Color(0xFF059669)], begin: Alignment.topLeft, end: Alignment.bottomRight),
             borderRadius: BorderRadius.circular(24),
-            boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.03), blurRadius: 20, offset: const Offset(0, 10))],
+            boxShadow: [BoxShadow(color: Colors.green.withOpacity(0.3), blurRadius: 20, offset: const Offset(0, 10))],
           ),
-          child: Column(children: [
-            Container(
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                border: Border.all(color: _primaryBlue.withOpacity(0.2), width: 4),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Container(padding: const EdgeInsets.all(8), decoration: BoxDecoration(color: Colors.white.withOpacity(0.2), shape: BoxShape.circle), child: const Icon(Icons.account_balance_wallet_rounded, color: Colors.white, size: 20)),
+                  const SizedBox(width: 12),
+                  Text('Cash in Hand', style: GoogleFonts.alexandria(fontSize: 14, color: Colors.white.withOpacity(0.9), fontWeight: FontWeight.w600)),
+                ],
               ),
-              child: CircleAvatar(
-                radius: 46, backgroundColor: _primaryBlue.withOpacity(0.1),
-                backgroundImage: (avatar != null && avatar.isNotEmpty) ? NetworkImage(avatar) : null,
-                child: (avatar == null || avatar.isEmpty) ? Text(name[0].toUpperCase(), style: GoogleFonts.alexandria(fontSize: 32, fontWeight: FontWeight.bold, color: _primaryBlue)) : null,
-              ),
-            ),
-            const SizedBox(height: 16),
-            Text(name, style: GoogleFonts.alexandria(fontSize: 22, fontWeight: FontWeight.bold, color: _textColor)),
-            const SizedBox(height: 4),
-            Text(phone, style: GoogleFonts.alexandria(fontSize: 14, color: _subtextColor)),
-            const SizedBox(height: 12),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-              decoration: BoxDecoration(color: Colors.grey.shade100, borderRadius: BorderRadius.circular(20)),
-              child: Text('Plate: $vehiclePlate', style: GoogleFonts.alexandria(fontSize: 12, fontWeight: FontWeight.w600, color: _textColor)),
-            )
-          ]),
+              const SizedBox(height: 16),
+              Text('৳${cashInHand.toStringAsFixed(0)}', style: GoogleFonts.alexandria(fontSize: 36, fontWeight: FontWeight.bold, color: Colors.white)),
+              const SizedBox(height: 8),
+              Text('To be submitted to admin', style: GoogleFonts.alexandria(fontSize: 12, color: Colors.white.withOpacity(0.8))),
+            ],
+          ),
         ),
+
         const SizedBox(height: 24),
 
-        // Stats Row
-        Row(children: [
-          Expanded(child: _buildStatCard('Total Trips', trips, Icons.local_shipping_rounded, _primaryBlue)),
-          const SizedBox(width: 16),
-          Expanded(child: _buildStatCard('Rating', rating, Icons.star_rounded, Colors.orange.shade500)),
-        ]),
+        Row(children: [Expanded(child: _buildStatCard('Total Trips', trips, Icons.local_shipping_rounded, _primaryBlue)), const SizedBox(width: 16), Expanded(child: _buildStatCard('Rating', rating, Icons.star_rounded, Colors.orange.shade500))]),
+
         const SizedBox(height: 48),
 
-        // Logout Button
-        SizedBox(
-          width: double.infinity, height: 56,
-          child: OutlinedButton.icon(
-            onPressed: _logout,
-            icon: const Icon(Icons.logout_rounded, color: Colors.redAccent),
-            label: Text('Sign Out', style: GoogleFonts.alexandria(fontSize: 15, fontWeight: FontWeight.bold, color: Colors.redAccent)),
-            style: OutlinedButton.styleFrom(
-                backgroundColor: Colors.white,
-                side: BorderSide(color: Colors.red.shade200),
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16))
-            ),
-          ),
-        )
+        SizedBox(width: double.infinity, height: 56, child: OutlinedButton.icon(onPressed: _logout, icon: const Icon(Icons.logout_rounded, color: Colors.redAccent), label: Text('Sign Out', style: GoogleFonts.alexandria(fontSize: 15, fontWeight: FontWeight.bold, color: Colors.redAccent)), style: OutlinedButton.styleFrom(backgroundColor: Colors.white, side: BorderSide(color: Colors.red.shade200), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)))))
       ]),
     );
   }
@@ -357,180 +527,72 @@ class _RiderDashboardState extends State<RiderDashboard> {
   Widget _buildStatCard(String title, String value, IconData icon, Color color) {
     return Container(
       padding: const EdgeInsets.all(20),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(20),
-        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.03), blurRadius: 15, offset: const Offset(0, 8))],
-      ),
-      child: Column(children: [
-        Container(
-          padding: const EdgeInsets.all(12),
-          decoration: BoxDecoration(color: color.withOpacity(0.1), shape: BoxShape.circle),
-          child: Icon(icon, color: color, size: 24),
-        ),
-        const SizedBox(height: 16),
-        Text(value, style: GoogleFonts.alexandria(fontSize: 24, fontWeight: FontWeight.bold, color: _textColor)),
-        const SizedBox(height: 4),
-        Text(title, style: GoogleFonts.alexandria(fontSize: 13, color: _subtextColor, fontWeight: FontWeight.w500)),
-      ]),
+      decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(20), boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.03), blurRadius: 15, offset: const Offset(0, 8))]),
+      child: Column(children: [Container(padding: const EdgeInsets.all(12), decoration: BoxDecoration(color: color.withOpacity(0.1), shape: BoxShape.circle), child: Icon(icon, color: color, size: 24)), const SizedBox(height: 16), Text(value, style: GoogleFonts.alexandria(fontSize: 24, fontWeight: FontWeight.bold, color: _textColor)), const SizedBox(height: 4), Text(title, style: GoogleFonts.alexandria(fontSize: 13, color: _subtextColor, fontWeight: FontWeight.w500))]),
     );
   }
-
-  // ─── HELPER COMPONENTS ─────────────────────────────────────────────────────
 
   Widget _buildEmptyState(String title, String subtitle, IconData icon) {
-    return Center(
-      child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-        Container(
-          padding: const EdgeInsets.all(24),
-          decoration: BoxDecoration(color: Colors.white, shape: BoxShape.circle, boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.03), blurRadius: 20)]),
-          child: Icon(icon, size: 48, color: Colors.grey.shade300),
-        ),
-        const SizedBox(height: 24),
-        Text(title, style: GoogleFonts.alexandria(fontSize: 18, fontWeight: FontWeight.bold, color: _textColor)),
-        const SizedBox(height: 8),
-        Text(subtitle, style: GoogleFonts.alexandria(fontSize: 14, color: _subtextColor)),
-      ]),
-    );
+    return Center(child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [Container(padding: const EdgeInsets.all(24), decoration: BoxDecoration(color: Colors.white, shape: BoxShape.circle, boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.03), blurRadius: 20)]), child: Icon(icon, size: 48, color: Colors.grey.shade300)), const SizedBox(height: 24), Text(title, style: GoogleFonts.alexandria(fontSize: 18, fontWeight: FontWeight.bold, color: _textColor)), const SizedBox(height: 8), Text(subtitle, style: GoogleFonts.alexandria(fontSize: 14, color: _subtextColor))]));
   }
 
-  // Polished Active Order Card
   Widget _buildActiveOrderCard(Map<String, dynamic> order) {
     final status = order['status'] as String? ?? '';
     final isPickup = status == 'picked_up';
     final isDelivery = status == 'out_for_delivery';
     final profile = order['profiles'] as Map?;
-
-    final themeColor = isPickup ? const Color(0xFF8B5CF6) : _primaryBlue; // Purple for pickup, Blue for delivery
+    final themeColor = isPickup ? const Color(0xFF8B5CF6) : _primaryBlue;
     final actionText = isPickup ? 'Mark as Dropped' : 'Mark as Delivered';
     final badgeText = isPickup ? 'PICKUP TASK' : 'DELIVERY TASK';
 
-    return Container(
-      decoration: BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.circular(20),
-          border: Border.all(color: themeColor.withOpacity(0.15)),
-          boxShadow: [BoxShadow(color: themeColor.withOpacity(0.05), blurRadius: 20, offset: const Offset(0, 8))]
-      ),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        // Card Header
-        Container(
-          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
-          decoration: BoxDecoration(color: themeColor.withOpacity(0.05), borderRadius: const BorderRadius.vertical(top: Radius.circular(20))),
-          child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-              decoration: ShapeDecoration(shape: const StadiumBorder(), color: themeColor.withOpacity(0.15)),
-              child: Text(badgeText, style: GoogleFonts.alexandria(fontSize: 10, fontWeight: FontWeight.bold, color: themeColor)),
-            ),
-            Text('#${order['order_number']}', style: GoogleFonts.alexandria(fontWeight: FontWeight.bold, fontSize: 14, color: _subtextColor)),
-          ]),
-        ),
-
-        // Card Body
-        Padding(
-          padding: const EdgeInsets.all(20),
-          child: Column(children: [
-            Row(children: [
-              Container(padding: const EdgeInsets.all(8), decoration: BoxDecoration(color: Colors.grey.shade100, shape: BoxShape.circle), child: const Icon(Icons.person_rounded, size: 18, color: Colors.grey)),
-              const SizedBox(width: 12),
-              Text(profile?['full_name'] ?? 'Guest Customer', style: GoogleFonts.alexandria(fontSize: 16, fontWeight: FontWeight.w700, color: _textColor)),
-            ]),
-            const SizedBox(height: 16),
-            Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+    return GestureDetector(
+      onTap: () {
+        Navigator.push(context, MaterialPageRoute(builder: (context) => RiderOrderDetailsScreen(order: order)));
+      },
+      child: Container(
+        decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(20), border: Border.all(color: themeColor.withOpacity(0.15)), boxShadow: [BoxShadow(color: themeColor.withOpacity(0.05), blurRadius: 20, offset: const Offset(0, 8))]),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Container(padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16), decoration: BoxDecoration(color: themeColor.withOpacity(0.05), borderRadius: const BorderRadius.vertical(top: Radius.circular(20))), child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [Container(padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6), decoration: ShapeDecoration(shape: const StadiumBorder(), color: themeColor.withOpacity(0.15)), child: Text(badgeText, style: GoogleFonts.alexandria(fontSize: 10, fontWeight: FontWeight.bold, color: themeColor))), Text('#${order['order_number']}', style: GoogleFonts.alexandria(fontWeight: FontWeight.bold, fontSize: 14, color: _subtextColor))])),
+          Padding(padding: const EdgeInsets.all(20), child: Column(children: [
+            Row(children: [Container(padding: const EdgeInsets.all(8), decoration: BoxDecoration(color: Colors.grey.shade100, shape: BoxShape.circle), child: const Icon(Icons.person_rounded, size: 18, color: Colors.grey)), const SizedBox(width: 12), Text(profile?['full_name'] ?? 'Guest Customer', style: GoogleFonts.alexandria(fontSize: 16, fontWeight: FontWeight.w700, color: _textColor))]), const SizedBox(height: 16),
+            Row(crossAxisAlignment: CrossAxisAlignment.center, children: [
               Container(padding: const EdgeInsets.all(8), decoration: BoxDecoration(color: Colors.grey.shade100, shape: BoxShape.circle), child: const Icon(Icons.location_on_rounded, size: 18, color: Colors.grey)),
               const SizedBox(width: 12),
-              Expanded(child: Padding(
-                padding: const EdgeInsets.only(top: 6),
-                child: Text(order['pickup_address'] ?? 'No address provided', style: GoogleFonts.alexandria(fontSize: 14, color: _subtextColor, height: 1.4)),
-              )),
+              Expanded(child: Text(order['pickup_address'] ?? 'No address provided', style: GoogleFonts.alexandria(fontSize: 14, color: _subtextColor, height: 1.4))),
+              IconButton(onPressed: () => _openGoogleMaps(order), icon: Icon(Icons.navigation_rounded, color: themeColor), tooltip: 'Navigate in Maps', style: IconButton.styleFrom(backgroundColor: themeColor.withOpacity(0.1)))
             ]),
             const SizedBox(height: 16),
-
-            // Dotted Divider
-            Row(children: List.generate(40, (index) => Expanded(child: Container(color: index % 2 == 0 ? Colors.transparent : Colors.grey.shade300, height: 1)))),
-
-            const SizedBox(height: 16),
-            Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-              Text('Cash to Collect', style: GoogleFonts.alexandria(fontSize: 13, color: _subtextColor, fontWeight: FontWeight.w500)),
-              Text('৳${((order['total_price'] as num?)?.toDouble() ?? 0).toStringAsFixed(0)}', style: GoogleFonts.alexandria(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.green.shade600)),
-            ]),
-            const SizedBox(height: 20),
-
-            // Action Button
-            SizedBox(
-              width: double.infinity, height: 54,
-              child: ElevatedButton.icon(
-                onPressed: () {
-                  if (isPickup) _updateOrderStatus(order['id'], 'in_process', 0.6);
-                  else if (isDelivery) _updateOrderStatus(order['id'], 'delivered', 1.0);
-                },
-                icon: Icon(Icons.check_circle_rounded, color: Colors.white, size: 22),
-                label: Text(actionText, style: GoogleFonts.alexandria(fontSize: 15, fontWeight: FontWeight.bold, color: Colors.white)),
-                style: ElevatedButton.styleFrom(backgroundColor: themeColor, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)), elevation: 0),
-              ),
-            ),
-          ]),
-        ),
-      ]),
+            Row(children: List.generate(40, (index) => Expanded(child: Container(color: index % 2 == 0 ? Colors.transparent : Colors.grey.shade300, height: 1)))), const SizedBox(height: 16),
+            Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [Text('Cash to Collect', style: GoogleFonts.alexandria(fontSize: 13, color: _subtextColor, fontWeight: FontWeight.w500)), Text('৳${((order['total_price'] as num?)?.toDouble() ?? 0).toStringAsFixed(0)}', style: GoogleFonts.alexandria(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.green.shade600))]), const SizedBox(height: 20),
+            SizedBox(width: double.infinity, height: 54, child: ElevatedButton.icon(onPressed: () { if (isPickup) _updateOrderStatus(order, 'in_process', 0.6); else if (isDelivery) _updateOrderStatus(order, 'delivered', 1.0); }, icon: const Icon(Icons.check_circle_rounded, color: Colors.white, size: 22), label: Text(actionText, style: GoogleFonts.alexandria(fontSize: 15, fontWeight: FontWeight.bold, color: Colors.white)), style: ElevatedButton.styleFrom(backgroundColor: themeColor, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)), elevation: 0)))
+          ]))
+        ]),
+      ),
     );
   }
 
-  // Polished History Card
   Widget _buildHistoryOrderCard(Map<String, dynamic> order) {
     final status = order['status'] as String? ?? '';
     final profile = order['profiles'] as Map?;
+    String historyLabel = 'COMPLETED'; Color historyColor = Colors.green;
 
-    String historyLabel = 'COMPLETED';
-    Color historyColor = Colors.green;
-
-    if (status == 'cancelled') {
-      historyLabel = 'CANCELLED';
-      historyColor = Colors.red;
-    } else {
+    if (status == 'cancelled') { historyLabel = 'CANCELLED'; historyColor = Colors.red; } else {
       bool pickedByMe = order['pickup_rider_id'] == _riderId;
       bool deliveredByMe = order['delivery_rider_id'] == _riderId && status == 'delivered';
-
-      if (pickedByMe && deliveredByMe) {
-        historyLabel = 'PICKUP & DELIVERY';
-        historyColor = Colors.green;
-      } else if (deliveredByMe) {
-        historyLabel = 'DELIVERED';
-        historyColor = _primaryBlue;
-      } else if (pickedByMe) {
-        historyLabel = 'PICKED UP';
-        historyColor = const Color(0xFF8B5CF6);
-      } else if (status == 'delivered') {
-        historyLabel = 'DELIVERED';
-        historyColor = Colors.green;
-      } else {
-        historyLabel = status.replaceAll('_', ' ').toUpperCase();
-        historyColor = Colors.grey.shade500;
-      }
+      if (pickedByMe && deliveredByMe) { historyLabel = 'PICKUP & DELIVERY'; historyColor = Colors.green; } else if (deliveredByMe) { historyLabel = 'DELIVERED'; historyColor = _primaryBlue; } else if (pickedByMe) { historyLabel = 'PICKED UP'; historyColor = const Color(0xFF8B5CF6); } else if (status == 'delivered') { historyLabel = 'DELIVERED'; historyColor = Colors.green; } else { historyLabel = status.replaceAll('_', ' ').toUpperCase(); historyColor = Colors.grey.shade500; }
     }
 
-    return Container(
-      padding: const EdgeInsets.all(20),
-      decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(16), boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.02), blurRadius: 10, offset: const Offset(0, 4))]),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-          Text('#${order['order_number']}', style: GoogleFonts.alexandria(fontWeight: FontWeight.bold, fontSize: 15, color: _textColor)),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-            decoration: ShapeDecoration(shape: const StadiumBorder(), color: historyColor.withOpacity(0.1)),
-            child: Text(historyLabel, style: GoogleFonts.alexandria(fontSize: 10, fontWeight: FontWeight.bold, color: historyColor)),
-          ),
+    return GestureDetector(
+      onTap: () {
+        Navigator.push(context, MaterialPageRoute(builder: (context) => RiderOrderDetailsScreen(order: order)));
+      },
+      child: Container(
+        padding: const EdgeInsets.all(20), decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(16), boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.02), blurRadius: 10, offset: const Offset(0, 4))]),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [Text('#${order['order_number']}', style: GoogleFonts.alexandria(fontWeight: FontWeight.bold, fontSize: 15, color: _textColor)), Container(padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6), decoration: ShapeDecoration(shape: const StadiumBorder(), color: historyColor.withOpacity(0.1)), child: Text(historyLabel, style: GoogleFonts.alexandria(fontSize: 10, fontWeight: FontWeight.bold, color: historyColor)))]), const SizedBox(height: 12),
+          Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [Row(children: [Icon(Icons.person_rounded, size: 16, color: Colors.grey.shade400), const SizedBox(width: 8), Text(profile?['full_name'] ?? 'Guest', style: GoogleFonts.alexandria(fontSize: 14, fontWeight: FontWeight.w600, color: _subtextColor))]), Text('৳${((order['total_price'] as num?)?.toDouble() ?? 0).toStringAsFixed(0)}', style: GoogleFonts.alexandria(fontSize: 15, fontWeight: FontWeight.bold, color: _textColor))])
         ]),
-        const SizedBox(height: 12),
-        Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-          Row(children: [
-            Icon(Icons.person_rounded, size: 16, color: Colors.grey.shade400),
-            const SizedBox(width: 8),
-            Text(profile?['full_name'] ?? 'Guest', style: GoogleFonts.alexandria(fontSize: 14, fontWeight: FontWeight.w600, color: _subtextColor)),
-          ]),
-          Text('৳${((order['total_price'] as num?)?.toDouble() ?? 0).toStringAsFixed(0)}', style: GoogleFonts.alexandria(fontSize: 15, fontWeight: FontWeight.bold, color: _textColor)),
-        ]),
-      ]),
+      ),
     );
   }
 }

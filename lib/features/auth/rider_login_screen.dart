@@ -2,6 +2,7 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:onesignal_flutter/onesignal_flutter.dart';
 import '../../main.dart';
 import '../home/rider_dashboard.dart';
 
@@ -43,8 +44,13 @@ class _RiderLoginScreenState extends State<RiderLoginScreen> {
 
       // Success! Save their ID so they don't have to log in again
       final prefs = await SharedPreferences.getInstance();
-      await prefs.setString('rider_id', data['id']);
+
+      // FIXED: Using "data['id']" instead of the placeholder
+      await prefs.setString('rider_id', data['id'].toString());
       await prefs.setString('rider_name', data['full_name']);
+
+      // IMPORTANT: Register this specific rider with OneSignal
+      OneSignal.login(data['id'].toString());
 
       if (mounted) {
         Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const RiderDashboard()));

@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "305466619382",
+    "project_id": "ezeewash-ed742",
+    "storage_bucket": "ezeewash-ed742.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:305466619382:android:afa47bfa793959c2f003d7",
+        "android_client_info": {
+          "package_name": "com.example.ezeewash_rider"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCXHe9Q-1Qq8qZVTxx6barusshUaoNOf4s"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
