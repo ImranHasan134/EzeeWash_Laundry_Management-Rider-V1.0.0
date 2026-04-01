@@ -3,31 +3,41 @@ import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'package:onesignal_flutter/onesignal_flutter.dart';
-
 import 'features/auth/rider_login_screen.dart';
 import 'features/home/rider_dashboard.dart';
 
 const String supabaseUrl = 'https://xxvicmprwtbxinuluyqx.supabase.co';
 const String supabaseAnonKey = 'sb_publishable_RGFSfrrMcY-uqQrFxNCNaw_Z6D6Jmo2';
-final supabase = Supabase.instance.client;
+
+// 🟢 SAFE GLOBAL ACCESS: Uses a getter so it doesn't crash before initialization completes
+SupabaseClient get supabase => Supabase.instance.client;
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // 1. Initialize Supabase
-  await Supabase.initialize(url: supabaseUrl, anonKey: supabaseAnonKey);
+  // 1. 🟢 CRITICAL FIX: Explicitly ask for Android 13+ Notification Permission FIRST
+  if (await Permission.notification.isDenied) {
+    await Permission.notification.request();
+  }
 
-  // 2. Initialize OneSignal
+  // 2. Initialize Supabase
+  await Supabase.initialize(
+      url: supabaseUrl,
+      anonKey: supabaseAnonKey
+  );
+
+  // 3. Initialize OneSignal
   OneSignal.Debug.setLogLevel(OSLogLevel.verbose);
   OneSignal.initialize("ccdfa117-940d-41fc-8a59-f2043aa3cee8");
   OneSignal.Notifications.requestPermission(true);
 
-  // 3. Check login status
+  // 4. Check login status
   final prefs = await SharedPreferences.getInstance();
   final riderId = prefs.getString('rider_id');
 
-  // 4. IMPORTANT: If logged in, register this phone with OneSignal!
+  // 5. IMPORTANT: If logged in, register this phone with OneSignal!
   if (riderId != null) {
     OneSignal.login(riderId); // Tells OneSignal: "This phone is rider #riderId"
   }

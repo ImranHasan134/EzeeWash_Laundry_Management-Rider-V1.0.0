@@ -33,7 +33,7 @@ class LocationService {
     try {
       await _supabase.from('riders').update({
         'current_lat': pos.latitude,
-        'current_lng': pos.lng,
+        'current_lng': pos.longitude,
         'last_location_update': DateTime.now().toIso8601String(),
       }).eq('id', riderId);
 
