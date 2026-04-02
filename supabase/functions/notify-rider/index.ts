@@ -6,31 +6,30 @@ serve(async (req) => {
     const newRecord = payload.record;
     const oldRecord = payload.old_record || {};
 
-    console.log(`Webhook triggered for Order ID: ${newRecord.id}`);
+    console.log(`🔔 Webhook triggered for Order ID: ${newRecord.id}`);
 
-    // 1. SMART CHECK
+    // 1. SMART CHECK: Ignore if status hasn't changed
     if (oldRecord.status && oldRecord.status === newRecord.status) {
-      console.log("Status did not change. Ignoring update.");
-      return new Response("Status unchanged, ignoring.", { status: 200 });
+      console.log("⏭️ Status unchanged. Skipping.");
+      return new Response("Status unchanged", { status: 200 });
     }
 
     // 2. Get Rider ID
     const riderId = newRecord.rider_id || newRecord.pickup_rider_id || newRecord.delivery_rider_id;
 
     if (!riderId) {
-      console.log("No rider assigned yet. Exiting.");
-      return new Response("No rider assigned, ignoring.", { status: 200 });
+      console.log("❌ No rider assigned. Exiting.");
+      return new Response("No rider", { status: 200 });
     }
 
-    // ⚠️ PASTE YOUR EXACT KEYS INSIDE THE QUOTES BELOW:
-   const ONESIGNAL_APP_ID = "98573413-e76f-4636-9442-40cce7f1e70e";
-    const ONESIGNAL_REST_API_KEY = "os_v2_app_tbltie7hn5ddnfccidgop4phbzzojxruownutrentkfjvytww7j4k4aesmwnhxkgypagmwxwtevei4rrce4liafttov52perm4xbkgi";
+    // 🚨 PASTE YOUR EXACT KEYS HERE 🚨
+    const ONESIGNAL_APP_ID = "98573413-e76f-4636-9442-40cce7f1e70e";
+    const ONESIGNAL_REST_API_KEY = "os_v2_app_tbltie7hn5ddnfccidgop4phbykr7fbpwofuxm4wmj5hglkl6bwuj7efh5lxquokyqb37jxnnbh3zb7l32iezulpufsd7y2yfki6uoi";
 
-    // 3. SMART STATUS CHECKER
+    // 3. STATUS CHECKER
     const status = newRecord.status;
     let titleText = "";
     let bodyText = "";
-    let shouldNotify = true;
 
     if (status === 'picked_up') {
       titleText = "New Pickup Task! 🏍️";
@@ -49,26 +48,18 @@ serve(async (req) => {
       bodyText = `Order Delivered Successfully.`;
     }
     else {
-      shouldNotify = false;
+      console.log(`Status is ${status}, no push needed.`);
+      return new Response("No notification needed", { status: 200 });
     }
 
-    if (!shouldNotify) {
-      console.log(`Status is '${status}'. No notification required.`);
-      return new Response("Status does not require a rider notification.", { status: 200 });
-    }
-
-    console.log(`Sending '${titleText}' to Rider: ${riderId}`);
-
-    // DEBUG LOGS TO VERIFY KEYS
-    console.log(`DEBUG APP ID: ${ONESIGNAL_APP_ID}`);
-    console.log(`DEBUG API KEY: ${String(ONESIGNAL_REST_API_KEY).substring(0, 5)}...`);
+    console.log(`📤 Sending '${titleText}' to Rider: ${riderId}`);
 
     // 4. Send to OneSignal
     const response = await fetch("https://onesignal.com/api/v1/notifications", {
       method: "POST",
       headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Basic ${ONESIGNAL_REST_API_KEY}`
+        "Content-Type": "application/json; charset=utf-8",
+        "Authorization": `Basic ${ONESIGNAL_REST_API_KEY}` // MUST HAVE THE WORD Basic
       },
       body: JSON.stringify({
         app_id: ONESIGNAL_APP_ID,
@@ -77,24 +68,21 @@ serve(async (req) => {
           external_id: [String(riderId)]
         },
         headings: { "en": titleText },
-        contents: { "en": bodyText },
-        data: {
-          order_id: newRecord.id,
-          status: status
-        }
+        contents: { "en": bodyText }
       })
     });
 
     const result = await response.json();
     console.log("OneSignal Response:", result);
 
-    return new Response(JSON.stringify({ success: true, result }), {
-      headers: { "Content-Type": "application/json" },
-      status: 200,
-    });
+    if (result.errors) {
+      throw new Error(JSON.stringify(result.errors));
+    }
+
+    return new Response(JSON.stringify({ success: true, result }), { status: 200 });
 
   } catch (error) {
-    console.error("ERROR:", error.message);
+    console.error("🔥 FATAL ERROR:", error.message);
     return new Response(JSON.stringify({ error: error.message }), { status: 500 });
   }
 });

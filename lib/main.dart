@@ -29,7 +29,7 @@ void main() async {
 
     // 2. Initialize OneSignal
     OneSignal.Debug.setLogLevel(OSLogLevel.verbose);
-    OneSignal.initialize(oneSignalAppId);
+    OneSignal.initialize("98573413-e76f-4636-9442-40cce7f1e70e");
 
     // Request notification permission (Required for Android 13+)
     OneSignal.Notifications.requestPermission(true);
