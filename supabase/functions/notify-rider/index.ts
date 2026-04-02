@@ -4,12 +4,11 @@ serve(async (req) => {
   try {
     const payload = await req.json();
     const newRecord = payload.record;
-    const oldRecord = payload.old_record || {}; // Grab the old record to compare changes
+    const oldRecord = payload.old_record || {};
 
     console.log(`Webhook triggered for Order ID: ${newRecord.id}`);
 
-    // 1. SMART CHECK: Did the status actually change?
-    // If the status is exactly the same as before, ignore this update to prevent duplicate spam.
+    // 1. SMART CHECK
     if (oldRecord.status && oldRecord.status === newRecord.status) {
       console.log("Status did not change. Ignoring update.");
       return new Response("Status unchanged, ignoring.", { status: 200 });
@@ -23,8 +22,9 @@ serve(async (req) => {
       return new Response("No rider assigned, ignoring.", { status: 200 });
     }
 
-    const ONESIGNAL_APP_ID = Deno.env.get("Rider_ONESIGNAL_APP_ID") ?? "";
-    const ONESIGNAL_REST_API_KEY = Deno.env.get("Rider_ONESIGNAL_REST_API_KEY") ?? "";
+    // ⚠️ PASTE YOUR EXACT KEYS INSIDE THE QUOTES BELOW:
+   const ONESIGNAL_APP_ID = "98573413-e76f-4636-9442-40cce7f1e70e";
+    const ONESIGNAL_REST_API_KEY = "os_v2_app_tbltie7hn5ddnfccidgop4phbzzojxruownutrentkfjvytww7j4k4aesmwnhxkgypagmwxwtevei4rrce4liafttov52perm4xbkgi";
 
     // 3. SMART STATUS CHECKER
     const status = newRecord.status;
@@ -49,7 +49,6 @@ serve(async (req) => {
       bodyText = `Order Delivered Successfully.`;
     }
     else {
-      // If it's any other status (like 'pending' or 'confirmed'), don't spam the rider
       shouldNotify = false;
     }
 
@@ -59,6 +58,10 @@ serve(async (req) => {
     }
 
     console.log(`Sending '${titleText}' to Rider: ${riderId}`);
+
+    // DEBUG LOGS TO VERIFY KEYS
+    console.log(`DEBUG APP ID: ${ONESIGNAL_APP_ID}`);
+    console.log(`DEBUG API KEY: ${String(ONESIGNAL_REST_API_KEY).substring(0, 5)}...`);
 
     // 4. Send to OneSignal
     const response = await fetch("https://onesignal.com/api/v1/notifications", {
