@@ -31,6 +31,14 @@ class _RiderDashboardState extends State<RiderDashboard> with WidgetsBindingObse
   RealtimeChannel? _channel;
   StreamSubscription<Position>? _positionStream;
 
+  // ─── NEW: TRIP ANALYTICS VARIABLES ───
+  int _todayTrips = 0;
+  int _thisMonthTrips = 0;
+  int _allTimeTrips = 0;
+  int _pickupOnlyCount = 0;
+  int _deliveryOnlyCount = 0;
+  int _roundTripCount = 0;
+
   final Color _primaryBlue = const Color(0xFF3B82F6);
   final Color _bgColor = const Color(0xFFF8FAFC);
   final Color _textColor = const Color(0xFF1E293B);
@@ -39,11 +47,9 @@ class _RiderDashboardState extends State<RiderDashboard> with WidgetsBindingObse
   @override
   void initState() {
     super.initState();
-    // 2. Register the Observer
     WidgetsBinding.instance.addObserver(this);
     _initDashboard();
 
-    // 3. Listen for Notification Taps
     OneSignal.Notifications.addClickListener((event) {
       if (mounted) {
         _fetchRiderProfile();
@@ -54,19 +60,15 @@ class _RiderDashboardState extends State<RiderDashboard> with WidgetsBindingObse
 
   @override
   void dispose() {
-    // 4. Remove the Observer when closing
     WidgetsBinding.instance.removeObserver(this);
     _channel?.unsubscribe();
     _positionStream?.cancel();
     super.dispose();
   }
 
-  // 5. THIS IS THE MAGIC AUTO-REFRESH FUNCTION
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
-      // The app just came back to the foreground! Refresh instantly.
-      debugPrint("App Resumed: Auto-refreshing data...");
       if (mounted && _riderId.isNotEmpty) {
         _fetchRiderProfile();
         _fetchOrders();
@@ -83,8 +85,6 @@ class _RiderDashboardState extends State<RiderDashboard> with WidgetsBindingObse
       return;
     }
 
-    // FIREBASE COMPLETELY REMOVED FROM HERE!
-
     await Future.wait([
       _fetchRiderProfile(),
       _fetchOrders(),
@@ -97,7 +97,65 @@ class _RiderDashboardState extends State<RiderDashboard> with WidgetsBindingObse
     }
   }
 
-  // ─── GPS TRACKING & NAVIGATION LOGIC ──────────────────────────────────────
+  // ─── THE NEW TRIP CALCULATION LOGIC ────────────────────────────────────────
+
+  void _calculateTripStats() {
+    _todayTrips = 0; _thisMonthTrips = 0; _allTimeTrips = 0;
+    _pickupOnlyCount = 0; _deliveryOnlyCount = 0; _roundTripCount = 0;
+
+    final now = DateTime.now();
+    final allMyOrders = [..._activeOrders, ..._historyOrders];
+
+    for (var order in allMyOrders) {
+      // 1. Identify what role the rider played
+      bool didPickup = order['pickup_rider_id'] == _riderId || order['rider_id'] == _riderId;
+      bool didDelivery = order['delivery_rider_id'] == _riderId || order['rider_id'] == _riderId;
+
+      String status = order['status'] ?? '';
+
+      // 2. Check if the task was actually completed
+      // Pickup is done when status is past 'picked_up'
+      bool pickupCompleted = didPickup && ['in_process', 'ready', 'out_for_delivery', 'delivered'].contains(status);
+      // Delivery is done when status is 'delivered'
+      bool deliveryCompleted = didDelivery && status == 'delivered';
+
+      int pointsEarnedForThisOrder = 0;
+
+      // 3. Determine the point value and categorize
+      if (pickupCompleted && deliveryCompleted) {
+        _roundTripCount++;
+        pointsEarnedForThisOrder = 2; // Round Trip = 2 Points
+      } else if (pickupCompleted && !didDelivery) {
+        _pickupOnlyCount++;
+        pointsEarnedForThisOrder = 1; // Pickup Only = 1 Point
+      } else if (!didPickup && deliveryCompleted) {
+        _deliveryOnlyCount++;
+        pointsEarnedForThisOrder = 1; // Delivery Only = 1 Point
+      } else if (pickupCompleted && didDelivery && !deliveryCompleted) {
+        // Edge case: They did the pickup, and are assigned the delivery, but haven't delivered yet.
+        pointsEarnedForThisOrder = 1; // Give them the 1 point for the pickup now
+      }
+
+      _allTimeTrips += pointsEarnedForThisOrder;
+
+      // 4. Date Filtering for Salary calculation
+      if (order['updated_at'] != null) {
+        DateTime updatedAt = DateTime.parse(order['updated_at']).toLocal();
+
+        // Today's Points (For Daily Salary)
+        if (updatedAt.year == now.year && updatedAt.month == now.month && updatedAt.day == now.day) {
+          _todayTrips += pointsEarnedForThisOrder;
+        }
+
+        // This Month's Points
+        if (updatedAt.year == now.year && updatedAt.month == now.month) {
+          _thisMonthTrips += pointsEarnedForThisOrder;
+        }
+      }
+    }
+  }
+
+  // ───────────────────────────────────────────────────────────────────────────
 
   Future<bool> _handleLocationPermission() async {
     bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
@@ -186,8 +244,6 @@ class _RiderDashboardState extends State<RiderDashboard> with WidgetsBindingObse
     }
   }
 
-  // ─── DATA FETCHING & UPDATES ───────────────────────────────────────────────
-
   Future<void> _fetchRiderProfile() async {
     try {
       final data = await supabase.from('riders').select().eq('id', _riderId).single();
@@ -216,15 +272,22 @@ class _RiderDashboardState extends State<RiderDashboard> with WidgetsBindingObse
 
       if (mounted) {
         setState(() {
+          // STRICT ACTIVE LOGIC
           _activeOrders = allOrders.where((o) {
-            return o['rider_id'] == _riderId && (o['status'] == 'picked_up' || o['status'] == 'out_for_delivery');
+            bool isMyPickup = (o['pickup_rider_id'] == _riderId || o['rider_id'] == _riderId) && o['status'] == 'picked_up';
+            bool isMyDelivery = (o['delivery_rider_id'] == _riderId || o['rider_id'] == _riderId) && o['status'] == 'out_for_delivery';
+            return isMyPickup || isMyDelivery;
           }).toList();
 
+          // HISTORY LOGIC (Involved, but not currently active for me)
           _historyOrders = allOrders.where((o) {
-            bool isActive = o['rider_id'] == _riderId && (o['status'] == 'picked_up' || o['status'] == 'out_for_delivery');
-            return !isActive;
+            bool involved = o['pickup_rider_id'] == _riderId || o['delivery_rider_id'] == _riderId || o['rider_id'] == _riderId;
+            bool isActive = (o['pickup_rider_id'] == _riderId || o['rider_id'] == _riderId) && o['status'] == 'picked_up' ||
+                (o['delivery_rider_id'] == _riderId || o['rider_id'] == _riderId) && o['status'] == 'out_for_delivery';
+            return involved && !isActive;
           }).toList();
 
+          _calculateTripStats();
           _loading = false;
         });
 
@@ -251,15 +314,17 @@ class _RiderDashboardState extends State<RiderDashboard> with WidgetsBindingObse
             final rId = newRecord['rider_id']?.toString() ?? '';
             final pId = newRecord['pickup_rider_id']?.toString() ?? '';
             final dId = newRecord['delivery_rider_id']?.toString() ?? '';
-
-            final isMine = (rId == _riderId || pId == _riderId || dId == _riderId);
             final status = newRecord['status']?.toString().toLowerCase() ?? '';
 
-            if (isMine && (status == 'picked_up' || status == 'out_for_delivery')) {
+            // STRICT REALTIME NOTIFICATION LOGIC
+            bool isMyPickup = (pId == _riderId || rId == _riderId) && status == 'picked_up';
+            bool isMyDelivery = (dId == _riderId || rId == _riderId) && status == 'out_for_delivery';
+
+            if (isMyPickup || isMyDelivery) {
               if (mounted) {
                 ScaffoldMessenger.of(context).showSnackBar(
                   SnackBar(
-                    content: Text('🏍️ New Task Assigned: ${newRecord['order_number']?.toString() ?? 'Update'}'),
+                    content: Text('🏍️ Task Updated: ${newRecord['order_number']?.toString() ?? 'Update'}'),
                     backgroundColor: Colors.green.shade700,
                     behavior: SnackBarBehavior.floating,
                     duration: const Duration(seconds: 4),
@@ -275,6 +340,22 @@ class _RiderDashboardState extends State<RiderDashboard> with WidgetsBindingObse
 
   Future<void> _toggleOnlineStatus(bool value) async {
     if (value) {
+      try {
+        final response = await supabase.from('riders').select('is_active').eq('id', _riderId).single();
+        final bool isActive = response['is_active'] ?? false;
+
+        if (!isActive) {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Your account is inactive. Please contact the Admin.', style: GoogleFonts.alexandria(color: Colors.white, fontWeight: FontWeight.bold)), backgroundColor: Colors.red));
+          }
+          setState(() => _isOnline = false);
+          return;
+        }
+      } catch (e) {
+        if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Could not verify account status.')));
+        return;
+      }
+
       bool hasPerm = await _handleLocationPermission();
       if (!hasPerm) return;
     }
@@ -283,12 +364,7 @@ class _RiderDashboardState extends State<RiderDashboard> with WidgetsBindingObse
 
     try {
       await supabase.from('riders').update({'is_online': value}).eq('id', _riderId);
-
-      if (value) {
-        _startLocationTracking();
-      } else {
-        _stopLocationTracking();
-      }
+      if (value) { _startLocationTracking(); } else { _stopLocationTracking(); }
     } catch (e) {
       setState(() => _isOnline = !value);
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Failed to update status')));
@@ -324,12 +400,10 @@ class _RiderDashboardState extends State<RiderDashboard> with WidgetsBindingObse
       await supabase.from('orders').update(updates).eq('id', orderId);
 
       if (newStatus == 'delivered' && _riderProfile != null) {
-        final currentTrips = _riderProfile!['total_trips'] as int? ?? 0;
         final currentCash = (_riderProfile!['cash_in_hand'] as num?)?.toDouble() ?? 0.0;
         final orderPrice = (order['total_price'] as num?)?.toDouble() ?? 0.0;
 
         await supabase.from('riders').update({
-          'total_trips': currentTrips + 1,
           'cash_in_hand': currentCash + orderPrice,
         }).eq('id', _riderId);
 
@@ -351,8 +425,6 @@ class _RiderDashboardState extends State<RiderDashboard> with WidgetsBindingObse
     await prefs.clear();
     if (mounted) Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const RiderLoginScreen()));
   }
-
-  // ─── MAIN BUILDER ──────────────────────────────────────────────────────────
 
   @override
   Widget build(BuildContext context) {
@@ -380,10 +452,7 @@ class _RiderDashboardState extends State<RiderDashboard> with WidgetsBindingObse
             child: IconButton(
               icon: Icon(Icons.refresh_rounded, color: _primaryBlue),
               tooltip: 'Refresh Data',
-              onPressed: () {
-                _fetchRiderProfile();
-                _fetchOrders();
-              },
+              onPressed: () { _fetchRiderProfile(); _fetchOrders(); },
             ),
           ),
         ],
@@ -410,8 +479,6 @@ class _RiderDashboardState extends State<RiderDashboard> with WidgetsBindingObse
       ),
     );
   }
-
-  // ─── UI TABS ───────────────────────────────────────────────────────────────
 
   Widget _buildActiveTasksTab() {
     return Column(children: [
@@ -466,56 +533,111 @@ class _RiderDashboardState extends State<RiderDashboard> with WidgetsBindingObse
     final name = _riderProfile?['full_name'] ?? 'Rider';
     final phone = _riderProfile?['phone'] ?? '—';
     final vehiclePlate = _riderProfile?['vehicle_plate'] ?? '—';
-    final trips = _riderProfile?['total_trips']?.toString() ?? '0';
     final rating = (_riderProfile?['rating'] as num?)?.toDouble().toStringAsFixed(1) ?? '5.0';
     final cashInHand = (_riderProfile?['cash_in_hand'] as num?)?.toDouble() ?? 0.0;
     final avatar = _riderProfile?['avatar_url'] as String?;
 
     return SingleChildScrollView(
       padding: const EdgeInsets.all(24),
-      child: Column(children: [
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+
+        // 1. Profile Header
         Container(
           width: double.infinity, padding: const EdgeInsets.all(24),
           decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(24), boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.03), blurRadius: 20, offset: const Offset(0, 10))]),
           child: Column(children: [
             Container(decoration: BoxDecoration(shape: BoxShape.circle, border: Border.all(color: _primaryBlue.withOpacity(0.2), width: 4)), child: CircleAvatar(radius: 46, backgroundColor: _primaryBlue.withOpacity(0.1), backgroundImage: (avatar != null && avatar.isNotEmpty) ? NetworkImage(avatar) : null, child: (avatar == null || avatar.isEmpty) ? Text(name[0].toUpperCase(), style: GoogleFonts.alexandria(fontSize: 32, fontWeight: FontWeight.bold, color: _primaryBlue)) : null)),
-            const SizedBox(height: 16), Text(name, style: GoogleFonts.alexandria(fontSize: 22, fontWeight: FontWeight.bold, color: _textColor)), const SizedBox(height: 4), Text(phone, style: GoogleFonts.alexandria(fontSize: 14, color: _subtextColor)), const SizedBox(height: 12),
+            const SizedBox(height: 16),
+            Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+              Text(name, style: GoogleFonts.alexandria(fontSize: 22, fontWeight: FontWeight.bold, color: _textColor)),
+              const SizedBox(width: 8),
+              Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4), decoration: BoxDecoration(color: Colors.orange.withOpacity(0.1), borderRadius: BorderRadius.circular(12)), child: Row(children: [const Icon(Icons.star_rounded, color: Colors.orange, size: 14), const SizedBox(width: 4), Text(rating, style: GoogleFonts.alexandria(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.orange))]))
+            ]),
+            const SizedBox(height: 4), Text(phone, style: GoogleFonts.alexandria(fontSize: 14, color: _subtextColor)), const SizedBox(height: 12),
             Container(padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6), decoration: BoxDecoration(color: Colors.grey.shade100, borderRadius: BorderRadius.circular(20)), child: Text('Plate: $vehiclePlate', style: GoogleFonts.alexandria(fontSize: 12, fontWeight: FontWeight.w600, color: _textColor)))
           ]),
         ),
 
         const SizedBox(height: 24),
 
-        // WALLET CARD
-        Container(
-          width: double.infinity,
-          padding: const EdgeInsets.all(24),
-          decoration: BoxDecoration(
-            gradient: const LinearGradient(colors: [Color(0xFF10B981), Color(0xFF059669)], begin: Alignment.topLeft, end: Alignment.bottomRight),
-            borderRadius: BorderRadius.circular(24),
-            boxShadow: [BoxShadow(color: Colors.green.withOpacity(0.3), blurRadius: 20, offset: const Offset(0, 10))],
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  Container(padding: const EdgeInsets.all(8), decoration: BoxDecoration(color: Colors.white.withOpacity(0.2), shape: BoxShape.circle), child: const Icon(Icons.account_balance_wallet_rounded, color: Colors.white, size: 20)),
-                  const SizedBox(width: 12),
-                  Text('Cash in Hand', style: GoogleFonts.alexandria(fontSize: 14, color: Colors.white.withOpacity(0.9), fontWeight: FontWeight.w600)),
-                ],
+        // 2. Salary & Trips Highlight
+        Row(
+          children: [
+            // Today's Trips (Salary Basis)
+            Expanded(
+              child: Container(
+                padding: const EdgeInsets.all(20),
+                decoration: BoxDecoration(
+                  gradient: const LinearGradient(colors: [Color(0xFF3B82F6), Color(0xFF2563EB)], begin: Alignment.topLeft, end: Alignment.bottomRight),
+                  borderRadius: BorderRadius.circular(24),
+                  boxShadow: [BoxShadow(color: _primaryBlue.withOpacity(0.3), blurRadius: 20, offset: const Offset(0, 10))],
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Container(padding: const EdgeInsets.all(8), decoration: BoxDecoration(color: Colors.white.withOpacity(0.2), shape: BoxShape.circle), child: const Icon(Icons.today_rounded, color: Colors.white, size: 20)),
+                    const SizedBox(height: 16),
+                    Text(_todayTrips.toString(), style: GoogleFonts.alexandria(fontSize: 36, fontWeight: FontWeight.bold, color: Colors.white)),
+                    const SizedBox(height: 4),
+                    Text('Today\'s Trips', style: GoogleFonts.alexandria(fontSize: 12, color: Colors.white.withOpacity(0.9), fontWeight: FontWeight.w600)),
+                  ],
+                ),
               ),
-              const SizedBox(height: 16),
-              Text('৳${cashInHand.toStringAsFixed(0)}', style: GoogleFonts.alexandria(fontSize: 36, fontWeight: FontWeight.bold, color: Colors.white)),
-              const SizedBox(height: 8),
-              Text('To be submitted to admin', style: GoogleFonts.alexandria(fontSize: 12, color: Colors.white.withOpacity(0.8))),
-            ],
-          ),
+            ),
+            const SizedBox(width: 16),
+            // Cash in Hand
+            Expanded(
+              child: Container(
+                padding: const EdgeInsets.all(20),
+                decoration: BoxDecoration(
+                  gradient: const LinearGradient(colors: [Color(0xFF10B981), Color(0xFF059669)], begin: Alignment.topLeft, end: Alignment.bottomRight),
+                  borderRadius: BorderRadius.circular(24),
+                  boxShadow: [BoxShadow(color: Colors.green.withOpacity(0.3), blurRadius: 20, offset: const Offset(0, 10))],
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Container(padding: const EdgeInsets.all(8), decoration: BoxDecoration(color: Colors.white.withOpacity(0.2), shape: BoxShape.circle), child: const Icon(Icons.account_balance_wallet_rounded, color: Colors.white, size: 20)),
+                    const SizedBox(height: 16),
+                    Text('৳${cashInHand.toStringAsFixed(0)}', style: GoogleFonts.alexandria(fontSize: 32, fontWeight: FontWeight.bold, color: Colors.white)),
+                    const SizedBox(height: 4),
+                    Text('Cash in Hand', style: GoogleFonts.alexandria(fontSize: 12, color: Colors.white.withOpacity(0.9), fontWeight: FontWeight.w600)),
+                  ],
+                ),
+              ),
+            ),
+          ],
         ),
 
         const SizedBox(height: 24),
+        Text('Trip Analytics', style: GoogleFonts.alexandria(fontSize: 18, fontWeight: FontWeight.bold, color: _textColor)),
+        const SizedBox(height: 16),
 
-        Row(children: [Expanded(child: _buildStatCard('Total Trips', trips, Icons.local_shipping_rounded, _primaryBlue)), const SizedBox(width: 16), Expanded(child: _buildStatCard('Rating', rating, Icons.star_rounded, Colors.orange.shade500))]),
+        // 3. Analytics Grid
+        Container(
+          padding: const EdgeInsets.all(20),
+          decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(24), boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.03), blurRadius: 20, offset: const Offset(0, 10))]),
+          child: Column(
+            children: [
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  _buildSmallStat('This Month', '$_thisMonthTrips', Icons.calendar_month_rounded, Colors.purple),
+                  _buildSmallStat('All-Time', '$_allTimeTrips', Icons.all_inclusive_rounded, Colors.teal),
+                ],
+              ),
+              const Padding(padding: EdgeInsets.symmetric(vertical: 16), child: Divider(height: 1)),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  _buildSmallStat('Round Trips', '$_roundTripCount', Icons.sync_alt_rounded, Colors.orange),
+                  _buildSmallStat('Pickup Only', '$_pickupOnlyCount', Icons.move_to_inbox_rounded, Colors.blueGrey),
+                  _buildSmallStat('Delivery Only', '$_deliveryOnlyCount', Icons.outbox_rounded, Colors.indigo),
+                ],
+              ),
+            ],
+          ),
+        ),
 
         const SizedBox(height: 48),
 
@@ -524,11 +646,15 @@ class _RiderDashboardState extends State<RiderDashboard> with WidgetsBindingObse
     );
   }
 
-  Widget _buildStatCard(String title, String value, IconData icon, Color color) {
-    return Container(
-      padding: const EdgeInsets.all(20),
-      decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(20), boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.03), blurRadius: 15, offset: const Offset(0, 8))]),
-      child: Column(children: [Container(padding: const EdgeInsets.all(12), decoration: BoxDecoration(color: color.withOpacity(0.1), shape: BoxShape.circle), child: Icon(icon, color: color, size: 24)), const SizedBox(height: 16), Text(value, style: GoogleFonts.alexandria(fontSize: 24, fontWeight: FontWeight.bold, color: _textColor)), const SizedBox(height: 4), Text(title, style: GoogleFonts.alexandria(fontSize: 13, color: _subtextColor, fontWeight: FontWeight.w500))]),
+  Widget _buildSmallStat(String title, String value, IconData icon, Color color) {
+    return Column(
+      children: [
+        Container(padding: const EdgeInsets.all(10), decoration: BoxDecoration(color: color.withOpacity(0.1), shape: BoxShape.circle), child: Icon(icon, color: color, size: 20)),
+        const SizedBox(height: 8),
+        Text(value, style: GoogleFonts.alexandria(fontSize: 18, fontWeight: FontWeight.bold, color: _textColor)),
+        const SizedBox(height: 2),
+        Text(title, style: GoogleFonts.alexandria(fontSize: 11, color: _subtextColor, fontWeight: FontWeight.w500)),
+      ],
     );
   }
 
@@ -538,8 +664,10 @@ class _RiderDashboardState extends State<RiderDashboard> with WidgetsBindingObse
 
   Widget _buildActiveOrderCard(Map<String, dynamic> order) {
     final status = order['status'] as String? ?? '';
+    // STRICT CARD UI LOGIC
     final isPickup = status == 'picked_up';
     final isDelivery = status == 'out_for_delivery';
+
     final profile = order['profiles'] as Map?;
     final themeColor = isPickup ? const Color(0xFF8B5CF6) : _primaryBlue;
     final actionText = isPickup ? 'Mark as Dropped' : 'Mark as Delivered';
@@ -577,9 +705,13 @@ class _RiderDashboardState extends State<RiderDashboard> with WidgetsBindingObse
     String historyLabel = 'COMPLETED'; Color historyColor = Colors.green;
 
     if (status == 'cancelled') { historyLabel = 'CANCELLED'; historyColor = Colors.red; } else {
-      bool pickedByMe = order['pickup_rider_id'] == _riderId;
-      bool deliveredByMe = order['delivery_rider_id'] == _riderId && status == 'delivered';
-      if (pickedByMe && deliveredByMe) { historyLabel = 'PICKUP & DELIVERY'; historyColor = Colors.green; } else if (deliveredByMe) { historyLabel = 'DELIVERED'; historyColor = _primaryBlue; } else if (pickedByMe) { historyLabel = 'PICKED UP'; historyColor = const Color(0xFF8B5CF6); } else if (status == 'delivered') { historyLabel = 'DELIVERED'; historyColor = Colors.green; } else { historyLabel = status.replaceAll('_', ' ').toUpperCase(); historyColor = Colors.grey.shade500; }
+      bool pickedByMe = order['pickup_rider_id'] == _riderId || order['rider_id'] == _riderId;
+      bool deliveredByMe = order['delivery_rider_id'] == _riderId || order['rider_id'] == _riderId;
+
+      if (pickedByMe && deliveredByMe && status == 'delivered') { historyLabel = 'ROUND TRIP'; historyColor = Colors.green; }
+      else if (deliveredByMe && status == 'delivered') { historyLabel = 'DELIVERY ONLY'; historyColor = _primaryBlue; }
+      else if (pickedByMe) { historyLabel = 'PICKUP ONLY'; historyColor = const Color(0xFF8B5CF6); }
+      else { historyLabel = status.replaceAll('_', ' ').toUpperCase(); historyColor = Colors.grey.shade500; }
     }
 
     return GestureDetector(
