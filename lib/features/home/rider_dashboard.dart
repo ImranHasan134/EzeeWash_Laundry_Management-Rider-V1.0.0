@@ -28,7 +28,8 @@ class _RiderDashboardState extends State<RiderDashboard> with WidgetsBindingObse
   List<Map<String, dynamic>> _activeOrders = [];
   List<Map<String, dynamic>> _historyOrders = [];
 
-  RealtimeChannel? _channel;
+  RealtimeChannel? _ordersChannel;
+  RealtimeChannel? _cashChannel;
   StreamSubscription<Position>? _positionStream;
 
   // ─── NEW: TRIP ANALYTICS VARIABLES ───
@@ -61,7 +62,8 @@ class _RiderDashboardState extends State<RiderDashboard> with WidgetsBindingObse
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    _channel?.unsubscribe();
+    _ordersChannel?.unsubscribe();
+    _cashChannel?.unsubscribe();
     _positionStream?.cancel();
     super.dispose();
   }
@@ -84,6 +86,9 @@ class _RiderDashboardState extends State<RiderDashboard> with WidgetsBindingObse
       _logout();
       return;
     }
+
+    // 🚨 ADD THIS LINE: Tells OneSignal this phone belongs to this specific Rider ID
+    OneSignal.login(_riderId);
 
     await Future.wait([
       _fetchRiderProfile(),
@@ -302,7 +307,8 @@ class _RiderDashboardState extends State<RiderDashboard> with WidgetsBindingObse
   }
 
   void _setupRealtime() {
-    _channel = supabase.channel('public:orders')
+    // 1. Listen for Order Task Updates
+    _ordersChannel = supabase.channel('public:orders')
         .onPostgresChanges(
         event: PostgresChangeEvent.all,
         schema: 'public',
@@ -310,7 +316,6 @@ class _RiderDashboardState extends State<RiderDashboard> with WidgetsBindingObse
         callback: (payload) {
           if (payload.newRecord != null) {
             final newRecord = payload.newRecord!;
-
             final rId = newRecord['rider_id']?.toString() ?? '';
             final pId = newRecord['pickup_rider_id']?.toString() ?? '';
             final dId = newRecord['delivery_rider_id']?.toString() ?? '';
@@ -334,6 +339,36 @@ class _RiderDashboardState extends State<RiderDashboard> with WidgetsBindingObse
             }
           }
           _fetchOrders();
+        }
+    ).subscribe();
+
+    // 2. NEW: Listen for Instant Cash Submissions!
+    _cashChannel = supabase.channel('public:rider_cash_submissions')
+        .onPostgresChanges(
+        event: PostgresChangeEvent.insert,
+        schema: 'public',
+        table: 'rider_cash_submissions',
+        filter: PostgresChangeFilter(
+          type: PostgresChangeFilterType.eq,
+          column: 'rider_id',
+          value: _riderId,
+        ),
+        callback: (payload) {
+          if (payload.newRecord != null) {
+            final amount = payload.newRecord!['amount'];
+            if (mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text('✅ Submitted In Hand Cash: ৳$amount Successfully', style: GoogleFonts.alexandria(color: Colors.white, fontWeight: FontWeight.bold)),
+                  backgroundColor: Colors.green.shade700,
+                  behavior: SnackBarBehavior.floating,
+                  duration: const Duration(seconds: 5),
+                ),
+              );
+              // Instantly refresh the profile so their cash balance drops to 0 on screen!
+              _fetchRiderProfile();
+            }
+          }
         }
     ).subscribe();
   }
