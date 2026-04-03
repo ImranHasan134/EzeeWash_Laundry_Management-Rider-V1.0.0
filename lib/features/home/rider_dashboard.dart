@@ -27,19 +27,16 @@ class _RiderDashboardState extends State<RiderDashboard> with WidgetsBindingObse
   List<Map<String, dynamic>> _activeOrders = [];
   List<Map<String, dynamic>> _historyOrders = [];
 
+  // STRICT LOGIC: Local state to handle the Two-Step Delivery (Mark Delivered -> Payment Collected)
+  final Set<String> _pendingPaymentOrders = {};
+
   RealtimeChannel? _ordersChannel;
   RealtimeChannel? _cashChannel;
   StreamSubscription<Position>? _positionStream;
 
-  // --- TRIP ANALYTICS ---
-  int _todayTrips = 0;
-  int _thisMonthTrips = 0;
-  int _allTimeTrips = 0;
-  int _pickupOnlyCount = 0;
-  int _deliveryOnlyCount = 0;
-  int _roundTripCount = 0;
+  int _todayTrips = 0; int _thisMonthTrips = 0; int _allTimeTrips = 0;
+  int _pickupOnlyCount = 0; int _deliveryOnlyCount = 0; int _roundTripCount = 0;
 
-  // YOUR ORIGINAL COLOR PALETTE
   final Color _primaryBlue = const Color(0xFF3B82F6);
   final Color _bgColor = const Color(0xFFF8FAFC);
   final Color _textColor = const Color(0xFF1E293B);
@@ -53,10 +50,7 @@ class _RiderDashboardState extends State<RiderDashboard> with WidgetsBindingObse
     _initDashboard();
 
     OneSignal.Notifications.addClickListener((event) {
-      if (mounted) {
-        _fetchRiderProfile();
-        _fetchOrders();
-      }
+      if (mounted) { _fetchRiderProfile(); _fetchOrders(); }
     });
   }
 
@@ -72,8 +66,7 @@ class _RiderDashboardState extends State<RiderDashboard> with WidgetsBindingObse
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed && mounted && _riderId.isNotEmpty) {
-      _fetchRiderProfile();
-      _fetchOrders();
+      _fetchRiderProfile(); _fetchOrders();
     }
   }
 
@@ -81,17 +74,13 @@ class _RiderDashboardState extends State<RiderDashboard> with WidgetsBindingObse
     final prefs = await SharedPreferences.getInstance();
     _riderId = prefs.getString('rider_id') ?? '';
 
-    if (_riderId.isEmpty) {
-      _logout();
-      return;
-    }
+    if (_riderId.isEmpty) { _logout(); return; }
 
     OneSignal.login(_riderId);
     await Future.wait([_fetchRiderProfile(), _fetchOrders()]);
     _setupRealtime();
   }
 
-  // --- TRIP CALCULATION ---
   void _calculateTripStats() {
     _todayTrips = 0; _thisMonthTrips = 0; _allTimeTrips = 0;
     _pickupOnlyCount = 0; _deliveryOnlyCount = 0; _roundTripCount = 0;
@@ -100,11 +89,12 @@ class _RiderDashboardState extends State<RiderDashboard> with WidgetsBindingObse
     final allMyOrders = [..._activeOrders, ..._historyOrders];
 
     for (var order in allMyOrders) {
-      bool didPickup = order['pickup_rider_id'] == _riderId || order['rider_id'] == _riderId;
-      bool didDelivery = order['delivery_rider_id'] == _riderId || order['rider_id'] == _riderId;
+      bool didPickup = order['pickup_rider_id'] == _riderId;
+      bool didDelivery = order['delivery_rider_id'] == _riderId;
       String status = order['status'] ?? '';
 
-      bool pickupCompleted = didPickup && ['in_process', 'ready', 'out_for_delivery', 'delivered'].contains(status);
+      // Count if pickup passed 'dropped' or delivery reached 'delivered'
+      bool pickupCompleted = didPickup && !['pending', 'confirmed', 'assign_pickup', 'picked_up', 'dropped'].contains(status);
       bool deliveryCompleted = didDelivery && status == 'delivered';
 
       int points = 0;
@@ -122,7 +112,6 @@ class _RiderDashboardState extends State<RiderDashboard> with WidgetsBindingObse
     }
   }
 
-  // --- LOCATION TRACKING (RE-INTEGRATED) ---
   Future<bool> _handleLocationPermission() async {
     bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
     if (!serviceEnabled) return false;
@@ -142,36 +131,24 @@ class _RiderDashboardState extends State<RiderDashboard> with WidgetsBindingObse
     _positionStream = Geolocator.getPositionStream(
       locationSettings: const LocationSettings(accuracy: LocationAccuracy.high, distanceFilter: 10),
     ).listen((Position position) {
-      // Updates Admin Fleet Map
       supabase.from('riders').update({
-        'current_lat': position.latitude,
-        'current_lng': position.longitude,
-        'last_location_updated_at': DateTime.now().toIso8601String(),
+        'current_lat': position.latitude, 'current_lng': position.longitude, 'last_location_updated_at': DateTime.now().toIso8601String(),
       }).eq('id', _riderId).then((_) => null);
 
-      // Updates Order Tracking for Customer
       if (_activeOrders.isNotEmpty) {
         for (var order in _activeOrders) {
           supabase.from('rider_locations').upsert({
-            'rider_id': _riderId,
-            'order_id': order['id'],
-            'latitude': position.latitude,
-            'longitude': position.longitude,
-            'updated_at': DateTime.now().toIso8601String(),
+            'rider_id': _riderId, 'order_id': order['id'], 'latitude': position.latitude, 'longitude': position.longitude, 'updated_at': DateTime.now().toIso8601String(),
           }, onConflict: 'order_id').then((_) => null);
         }
       }
     });
   }
 
-  void _stopLocationTracking() {
-    _positionStream?.cancel();
-    _positionStream = null;
-  }
+  void _stopLocationTracking() { _positionStream?.cancel(); _positionStream = null; }
 
   Future<void> _openGoogleMaps(Map<String, dynamic> order) async {
-    final lat = order['latitude'] ?? order['pickup_lat'];
-    final lng = order['longitude'] ?? order['pickup_lng'];
+    final lat = order['latitude'] ?? order['pickup_lat']; final lng = order['longitude'] ?? order['pickup_lng'];
     final url = Uri.parse('https://www.google.com/maps/search/?api=1&query=$lat,$lng');
     try { await launchUrl(url, mode: LaunchMode.externalApplication); } catch (e) { }
   }
@@ -180,15 +157,9 @@ class _RiderDashboardState extends State<RiderDashboard> with WidgetsBindingObse
     try {
       final data = await supabase.from('riders').select().eq('id', _riderId).single();
       if (mounted) {
-        setState(() {
-          _riderProfile = data;
-          _isOnline = data['is_online'] ?? false;
-        });
-        if ((data['is_active'] ?? false) && _positionStream == null) {
-          _startLocationTracking();
-        } else if (!(data['is_active'] ?? false)) {
-          _stopLocationTracking();
-        }
+        setState(() { _riderProfile = data; _isOnline = data['is_online'] ?? false; });
+        if ((data['is_active'] ?? false) && _positionStream == null) { _startLocationTracking(); }
+        else if (!(data['is_active'] ?? false)) { _stopLocationTracking(); }
       }
     } catch (e) { }
   }
@@ -200,22 +171,27 @@ class _RiderDashboardState extends State<RiderDashboard> with WidgetsBindingObse
       final data = await supabase
           .from('orders')
           .select('*, profiles(full_name, phone)')
-          .or('rider_id.eq.$_riderId,pickup_rider_id.eq.$_riderId,delivery_rider_id.eq.$_riderId')
+          .or('pickup_rider_id.eq.$_riderId,delivery_rider_id.eq.$_riderId')
           .order('updated_at', ascending: false);
+
       final allOrders = List<Map<String, dynamic>>.from(data);
+
       if (mounted) {
         setState(() {
+          // STRICT LOGIC: Active Orders include pickup flow up to 'dropped' and delivery flow at 'out_for_delivery'
           _activeOrders = allOrders.where((o) {
-            bool isMyPickup = (o['pickup_rider_id'] == _riderId || o['rider_id'] == _riderId) && o['status'] == 'picked_up';
-            bool isMyDelivery = (o['delivery_rider_id'] == _riderId || o['rider_id'] == _riderId) && o['status'] == 'out_for_delivery';
+            bool isMyPickup = o['pickup_rider_id'] == _riderId && ['assign_pickup', 'picked_up', 'dropped'].contains(o['status']);
+            bool isMyDelivery = o['delivery_rider_id'] == _riderId && o['status'] == 'out_for_delivery';
             return isMyPickup || isMyDelivery;
           }).toList();
+
+          // STRICT LOGIC: History Orders include finished pickup flows and finished delivery flows
           _historyOrders = allOrders.where((o) {
-            bool involved = o['pickup_rider_id'] == _riderId || o['delivery_rider_id'] == _riderId || o['rider_id'] == _riderId;
-            bool isActive = (o['pickup_rider_id'] == _riderId || o['rider_id'] == _riderId) && o['status'] == 'picked_up' ||
-                (o['delivery_rider_id'] == _riderId || o['rider_id'] == _riderId) && o['status'] == 'out_for_delivery';
-            return involved && !isActive;
+            bool finishedPickup = o['pickup_rider_id'] == _riderId && !['pending', 'confirmed', 'assign_pickup', 'picked_up', 'dropped'].contains(o['status']);
+            bool finishedDelivery = o['delivery_rider_id'] == _riderId && o['status'] == 'delivered';
+            return finishedPickup || finishedDelivery;
           }).toList();
+
           _calculateTripStats();
           _loading = false;
         });
@@ -224,44 +200,55 @@ class _RiderDashboardState extends State<RiderDashboard> with WidgetsBindingObse
   }
 
   void _setupRealtime() {
-    // Listen to Rider Profile for Instant Cash/Status updates
-    supabase.channel('rider_profile_sync')
-        .onPostgresChanges(
-      event: PostgresChangeEvent.update,
-      schema: 'public',
-      table: 'riders',
-      filter: PostgresChangeFilter(type: PostgresChangeFilterType.eq, column: 'id', value: _riderId),
-      callback: (payload) {
-        debugPrint('Profile updated: ${payload.newRecord}');
-        _fetchRiderProfile(); // Refresh the UI immediately
-      },
+    _cashChannel = supabase.channel('rider_profile_sync').onPostgresChanges(
+      event: PostgresChangeEvent.update, schema: 'public', table: 'riders', filter: PostgresChangeFilter(type: PostgresChangeFilterType.eq, column: 'id', value: _riderId),
+      callback: (payload) { _fetchRiderProfile(); },
     ).subscribe();
 
-    // Keep your existing Orders channel below...
+    _ordersChannel = supabase.channel('rider_orders_sync').onPostgresChanges(
+      event: PostgresChangeEvent.all, schema: 'public', table: 'orders',
+      callback: (payload) { _fetchOrders(); },
+    ).subscribe();
   }
 
   Future<void> _toggleOnlineStatus(bool value) async {
     setState(() => _isOnline = value);
-    try { await supabase.from('riders').update({'is_online': value}).eq('id', _riderId); } catch (e) { setState(() => _isOnline = !value); }
+    try { await supabase.from('riders').update({'is_online': value}).eq('id', _riderId); }
+    catch (e) { setState(() => _isOnline = !value); }
   }
 
+  // STRICT LOGIC: DB Status Updater with Atomic Cash Increment for Final Step
   Future<void> _updateOrderStatus(Map<String, dynamic> order, String newStatus, double progress) async {
     try {
       final now = DateTime.now();
-      await supabase.from('orders').update({ 'status': newStatus, 'progress': progress, 'updated_at': now.toIso8601String() }).eq('id', order['id']);
+
+      // 1. Update the Order Status
+      await supabase.from('orders').update({
+        'status': newStatus,
+        'progress': progress,
+        'updated_at': now.toIso8601String()
+      }).eq('id', order['id']);
+
+      // 2. The Final Handshake: Calculate and Push Cash Directly
       if (newStatus == 'delivered') {
         final orderPrice = (order['total_price'] as num?)?.toDouble() ?? 0.0;
 
-        // 🚀 NEW ATOMIC UPDATE: Tells the DB to add money, no matter what local state says
-        await supabase.rpc('increment_rider_cash', params: {
-          'p_rider_id': _riderId,
-          'p_amount': orderPrice,
-        });
+        // Grab the rider's current Total Due before adding the new cash
+        final currentDue = (_riderProfile?['cash_in_hand'] as num?)?.toDouble() ?? 0.0;
 
-        // Refresh profile to show the new balance immediately
+        // EXACT FIX: We ONLY update cash_in_hand (Total Due Amount).
+        // We completely ignore 'todays_cash' to prevent the Admin app from showing collected money early.
+        await supabase.from('riders').update({
+          'cash_in_hand': currentDue + orderPrice
+        }).eq('id', _riderId);
+
         await _fetchRiderProfile();
-      }();
-    } catch (e) { }
+      }
+
+      await _fetchOrders();
+    } catch (e) {
+      debugPrint("Error updating status: $e");
+    }
   }
 
   Future<void> _logout() async {
@@ -270,8 +257,6 @@ class _RiderDashboardState extends State<RiderDashboard> with WidgetsBindingObse
     final prefs = await SharedPreferences.getInstance(); await prefs.clear();
     if (mounted) Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const RiderLoginScreen()));
   }
-
-  // --- RESTORED UI BUILDERS ---
 
   @override
   Widget build(BuildContext context) {
@@ -336,21 +321,41 @@ class _RiderDashboardState extends State<RiderDashboard> with WidgetsBindingObse
   }
 
   Widget _buildActiveOrderCard(Map<String, dynamic> order) {
-    final isPickup = order['status'] == 'picked_up';
-    final themeColor = isPickup ? const Color(0xFF8B5CF6) : _primaryBlue;
+    final status = order['status'] ?? '';
+    final isDelivery = status == 'out_for_delivery';
+    final themeColor = isDelivery ? _primaryBlue : const Color(0xFF8B5CF6);
     final profile = order['profiles'] as Map?;
+
+    // STRICT LOGIC: Dynamic Action Buttons for Handshake flow
+    Widget actionButton;
+    if (status == 'assign_pickup') {
+      actionButton = ElevatedButton(onPressed: () => _updateOrderStatus(order, 'picked_up', 0.4), style: ElevatedButton.styleFrom(backgroundColor: themeColor, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14))), child: Text('Picked Up', style: GoogleFonts.alexandria(color: Colors.white, fontWeight: FontWeight.bold)));
+    } else if (status == 'picked_up') {
+      actionButton = ElevatedButton(onPressed: () => _updateOrderStatus(order, 'dropped', 0.5), style: ElevatedButton.styleFrom(backgroundColor: themeColor, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14))), child: Text('Drop Order', style: GoogleFonts.alexandria(color: Colors.white, fontWeight: FontWeight.bold)));
+    } else if (status == 'dropped') {
+      actionButton = ElevatedButton(onPressed: null, style: ElevatedButton.styleFrom(backgroundColor: Colors.grey.shade400, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14))), child: Text('Processing Drop Off...', style: GoogleFonts.alexandria(color: Colors.white, fontWeight: FontWeight.bold)));
+    } else if (isDelivery) {
+      if (_pendingPaymentOrders.contains(order['id'])) {
+        actionButton = ElevatedButton(onPressed: () { _pendingPaymentOrders.remove(order['id']); _updateOrderStatus(order, 'delivered', 1.0); }, style: ElevatedButton.styleFrom(backgroundColor: Colors.green.shade600, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14))), child: Text('Payment Collected', style: GoogleFonts.alexandria(color: Colors.white, fontWeight: FontWeight.bold)));
+      } else {
+        actionButton = ElevatedButton(onPressed: () { setState(() => _pendingPaymentOrders.add(order['id'])); }, style: ElevatedButton.styleFrom(backgroundColor: themeColor, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14))), child: Text('Mark Delivered', style: GoogleFonts.alexandria(color: Colors.white, fontWeight: FontWeight.bold)));
+      }
+    } else {
+      actionButton = const SizedBox.shrink();
+    }
+
     return GestureDetector(
       onTap: () => Navigator.push(context, MaterialPageRoute(builder: (context) => RiderOrderDetailsScreen(order: order))),
       child: Container(
         decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(20), border: Border.all(color: themeColor.withOpacity(0.15)), boxShadow: [BoxShadow(color: themeColor.withOpacity(0.05), blurRadius: 20, offset: const Offset(0, 8))]),
         child: Column(children: [
-          Container(padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16), decoration: BoxDecoration(color: themeColor.withOpacity(0.05), borderRadius: const BorderRadius.vertical(top: Radius.circular(20))), child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [Container(padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6), decoration: ShapeDecoration(shape: const StadiumBorder(), color: themeColor.withOpacity(0.15)), child: Text(isPickup ? 'PICKUP TASK' : 'DELIVERY TASK', style: GoogleFonts.alexandria(fontSize: 10, fontWeight: FontWeight.bold, color: themeColor))), Text('#${order['order_number']}', style: GoogleFonts.alexandria(fontWeight: FontWeight.bold, fontSize: 14, color: _subtextColor))])),
+          Container(padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16), decoration: BoxDecoration(color: themeColor.withOpacity(0.05), borderRadius: const BorderRadius.vertical(top: Radius.circular(20))), child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [Container(padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6), decoration: ShapeDecoration(shape: const StadiumBorder(), color: themeColor.withOpacity(0.15)), child: Text(isDelivery ? 'DELIVERY TASK' : 'PICKUP TASK', style: GoogleFonts.alexandria(fontSize: 10, fontWeight: FontWeight.bold, color: themeColor))), Text('#${order['order_number']}', style: GoogleFonts.alexandria(fontWeight: FontWeight.bold, fontSize: 14, color: _subtextColor))])),
           Padding(padding: const EdgeInsets.all(20), child: Column(children: [
             Row(children: [Container(padding: const EdgeInsets.all(8), decoration: BoxDecoration(color: Colors.grey.shade100, shape: BoxShape.circle), child: const Icon(Icons.person_rounded, size: 18, color: Colors.grey)), const SizedBox(width: 12), Text(profile?['full_name'] ?? 'Guest Customer', style: GoogleFonts.alexandria(fontSize: 16, fontWeight: FontWeight.w700, color: _textColor))]), const SizedBox(height: 16),
             Row(children: [Container(padding: const EdgeInsets.all(8), decoration: BoxDecoration(color: Colors.grey.shade100, shape: BoxShape.circle), child: const Icon(Icons.location_on_rounded, size: 18, color: Colors.grey)), const SizedBox(width: 12), Expanded(child: Text(order['pickup_address'] ?? 'No address', style: GoogleFonts.alexandria(fontSize: 14, color: _subtextColor))), IconButton(onPressed: () => _openGoogleMaps(order), icon: Icon(Icons.navigation_rounded, color: themeColor))]),
             const Padding(padding: EdgeInsets.symmetric(vertical: 16), child: Divider()),
             Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [Text('Cash to Collect', style: GoogleFonts.alexandria(fontSize: 13, color: _subtextColor)), Text('৳${((order['total_price'] as num?)?.toDouble() ?? 0).toStringAsFixed(0)}', style: GoogleFonts.alexandria(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.green.shade600))]), const SizedBox(height: 20),
-            SizedBox(width: double.infinity, height: 54, child: ElevatedButton(onPressed: () => isPickup ? _updateOrderStatus(order, 'in_process', 0.6) : _updateOrderStatus(order, 'delivered', 1.0), style: ElevatedButton.styleFrom(backgroundColor: themeColor, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14))), child: Text(isPickup ? 'Mark as Dropped' : 'Mark as Delivered', style: GoogleFonts.alexandria(color: Colors.white, fontWeight: FontWeight.bold)))),
+            SizedBox(width: double.infinity, height: 54, child: actionButton),
           ]))
         ]),
       ),
@@ -401,8 +406,8 @@ class _RiderDashboardState extends State<RiderDashboard> with WidgetsBindingObse
 
   Widget _buildHistoryOrderCard(Map<String, dynamic> order) {
     final status = order['status'] as String? ?? '';
-    bool picked = order['pickup_rider_id'] == _riderId || order['rider_id'] == _riderId;
-    bool deliv = order['delivery_rider_id'] == _riderId || order['rider_id'] == _riderId;
+    bool picked = order['pickup_rider_id'] == _riderId;
+    bool deliv = order['delivery_rider_id'] == _riderId;
     String label = status == 'delivered' ? (picked && deliv ? 'ROUND TRIP' : picked ? 'PICKUP ONLY' : 'DELIVERY ONLY') : status.toUpperCase();
     return Container(padding: const EdgeInsets.all(20), decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(16)), child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text('#${order['order_number']}', style: GoogleFonts.alexandria(fontWeight: FontWeight.bold)), Text(label, style: GoogleFonts.alexandria(fontSize: 10, fontWeight: FontWeight.bold, color: _primaryBlue))]), Text('৳${order['total_price']}', style: GoogleFonts.alexandria(fontWeight: FontWeight.bold))]));
   }

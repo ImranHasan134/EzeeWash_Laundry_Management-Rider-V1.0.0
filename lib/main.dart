@@ -1,3 +1,4 @@
+import 'core/constants/api_keys.dart';
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -29,7 +30,7 @@ void main() async {
 
     // 2. Initialize OneSignal
     OneSignal.Debug.setLogLevel(OSLogLevel.verbose);
-    OneSignal.initialize("98573413-e76f-4636-9442-40cce7f1e70e");
+    OneSignal.initialize(ApiKeys.oneSignalAppId);
 
     // Request notification permission (Required for Android 13+)
     OneSignal.Notifications.requestPermission(true);
