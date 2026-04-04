@@ -12,6 +12,10 @@ dependencies:
     sdk: flutter
   cupertino_icons: ^1.0.8
 
+  #google maps:
+  google_maps_flutter: ^2.5.3
+  flutter_polyline_points: ^2.1.0
+
   # Backend & State
   supabase_flutter: ^2.12.2
   shared_preferences: ^2.5.5
@@ -19,7 +23,7 @@ dependencies:
   # UI & Fonts
   google_fonts: ^8.0.2
 
-  # Location & Navigation (Using Stable Versions)
+  # Location & Navigation
   geolocator: ^14.0.2
   url_launcher: ^6.3.2
   permission_handler: ^12.0.1
@@ -29,18 +33,27 @@ dependencies:
   # Push Notifications
   firebase_core: ^4.6.0
   onesignal_flutter: ^5.4.6
-  # 🟢 FIXED: Removed firebase_messaging to stop the conflict with OneSignal!
-  # 🟢 FIXED: Removed slide_to_act since you are using the Tap button now.
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^6.0.0
   flutter_launcher_icons: ^0.14.4
+  flutter_native_splash: ^2.3.1
+
+
+flutter_native_splash:
+  color: "#001C3F"
+  image: "assets/icon/rider_logo.png"
+
+
+  fullscreen: true
+  android_12:
+    color: "#001C3F"
+    icon_background_color: "#001C3F"
+    image: "assets/icon/rider_logo.png"
 
 flutter:
   uses-material-design: true
-
-flutter_icons:
-  android: true
-  image_path: "assets/icon/rider_logo.png"
+  assets:
+    - assets/icon/rider_logo.png
