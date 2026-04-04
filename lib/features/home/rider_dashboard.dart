@@ -27,12 +27,13 @@ class _RiderDashboardState extends State<RiderDashboard> with WidgetsBindingObse
   List<Map<String, dynamic>> _activeOrders = [];
   List<Map<String, dynamic>> _historyOrders = [];
 
-  // STRICT LOGIC: Local state to handle the Two-Step Delivery (Mark Delivered -> Payment Collected)
   final Set<String> _pendingPaymentOrders = {};
 
   RealtimeChannel? _ordersChannel;
   RealtimeChannel? _cashChannel;
-  StreamSubscription<Position>? _positionStream;
+
+  // STRICT LOGIC: Replaced Stream with a 10-second Timer
+  Timer? _locationTimer;
 
   int _todayTrips = 0; int _thisMonthTrips = 0; int _allTimeTrips = 0;
   int _pickupOnlyCount = 0; int _deliveryOnlyCount = 0; int _roundTripCount = 0;
@@ -59,7 +60,7 @@ class _RiderDashboardState extends State<RiderDashboard> with WidgetsBindingObse
     WidgetsBinding.instance.removeObserver(this);
     _ordersChannel?.unsubscribe();
     _cashChannel?.unsubscribe();
-    _stopLocationTracking();
+    _stopLocationTracking(); // Kills the 10-second timer
     super.dispose();
   }
 
@@ -77,7 +78,8 @@ class _RiderDashboardState extends State<RiderDashboard> with WidgetsBindingObse
     if (_riderId.isEmpty) { _logout(); return; }
 
     OneSignal.login(_riderId);
-    await Future.wait([_fetchRiderProfile(), _fetchOrders()]);
+
+    await Future.wait<void>([_fetchRiderProfile(), _fetchOrders()]);
     _setupRealtime();
   }
 
@@ -93,7 +95,6 @@ class _RiderDashboardState extends State<RiderDashboard> with WidgetsBindingObse
       bool didDelivery = order['delivery_rider_id'] == _riderId;
       String status = order['status'] ?? '';
 
-      // Count if pickup passed 'dropped' or delivery reached 'delivered'
       bool pickupCompleted = didPickup && !['pending', 'confirmed', 'assign_pickup', 'picked_up', 'dropped'].contains(status);
       bool deliveryCompleted = didDelivery && status == 'delivered';
 
@@ -123,45 +124,103 @@ class _RiderDashboardState extends State<RiderDashboard> with WidgetsBindingObse
     return permission != LocationPermission.deniedForever;
   }
 
+  // --- EXACT FIX: 10-Second Time-Based Tracking ---
   void _startLocationTracking() async {
     final hasPermission = await _handleLocationPermission();
     if (!hasPermission) return;
 
-    _positionStream?.cancel();
-    _positionStream = Geolocator.getPositionStream(
-      locationSettings: const LocationSettings(accuracy: LocationAccuracy.high, distanceFilter: 10),
-    ).listen((Position position) {
-      supabase.from('riders').update({
-        'current_lat': position.latitude, 'current_lng': position.longitude, 'last_location_updated_at': DateTime.now().toIso8601String(),
-      }).eq('id', _riderId).then((_) => null);
+    try {
+      // 1. Instantly push first location when accessing
+      Position initialPosition = await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.high);
+      await _pushLocationToDB(initialPosition);
+    } catch (e) {
+      debugPrint("Error fetching initial GPS: $e");
+    }
 
-      if (_activeOrders.isNotEmpty) {
-        for (var order in _activeOrders) {
-          supabase.from('rider_locations').upsert({
-            'rider_id': _riderId, 'order_id': order['id'], 'latitude': position.latitude, 'longitude': position.longitude, 'updated_at': DateTime.now().toIso8601String(),
-          }, onConflict: 'order_id').then((_) => null);
+    // 2. Start the 10-second loop
+    _locationTimer?.cancel();
+    _locationTimer = Timer.periodic(const Duration(seconds: 10), (timer) async {
+
+      // ONLY push if Rider is online AND actively working on an order
+      if (_isOnline && _activeOrders.isNotEmpty) {
+        try {
+          Position position = await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.high);
+          await _pushLocationToDB(position);
+        } catch (e) {
+          debugPrint("Timer GPS Error: $e");
         }
       }
     });
   }
 
-  void _stopLocationTracking() { _positionStream?.cancel(); _positionStream = null; }
+  Future<void> _pushLocationToDB(Position position) async {
+    try {
+      // Update riders table for Realtime WebSockets
+      await supabase.from('riders').update({
+        'current_lat': position.latitude,
+        'current_lng': position.longitude,
+        'last_location_update': DateTime.now().toIso8601String(),
+      }).eq('id', _riderId);
 
-  Future<void> _openGoogleMaps(Map<String, dynamic> order) async {
-    final lat = order['latitude'] ?? order['pickup_lat']; final lng = order['longitude'] ?? order['pickup_lng'];
-    final url = Uri.parse('https://www.google.com/maps/search/?api=1&query=$lat,$lng');
-    try { await launchUrl(url, mode: LaunchMode.externalApplication); } catch (e) { }
+    } catch (e) {
+      debugPrint("Error pushing to DB: $e");
+    }
+  }
+
+  void _stopLocationTracking() {
+    _locationTimer?.cancel();
+    _locationTimer = null;
   }
 
   Future<void> _fetchRiderProfile() async {
     try {
       final data = await supabase.from('riders').select().eq('id', _riderId).single();
       if (mounted) {
-        setState(() { _riderProfile = data; _isOnline = data['is_online'] ?? false; });
-        if ((data['is_active'] ?? false) && _positionStream == null) { _startLocationTracking(); }
-        else if (!(data['is_active'] ?? false)) { _stopLocationTracking(); }
+        setState(() {
+          _riderProfile = data;
+          _isOnline = data['is_online'] ?? false;
+        });
+
+        // Use _locationTimer instead of _positionStream
+        if ((data['is_active'] ?? false) && _locationTimer == null) {
+          _startLocationTracking();
+        } else if (!(data['is_active'] ?? false)) {
+          _stopLocationTracking();
+        }
       }
-    } catch (e) { }
+    } catch (e) {
+      debugPrint("Error fetching rider profile: $e");
+    }
+  }
+
+  Future<void> _openGoogleMaps(Map<String, dynamic> order) async {
+    final lat = order['latitude'] ?? order['pickup_lat'];
+    final lng = order['longitude'] ?? order['pickup_lng'];
+    final address = order['pickup_address'] ?? '';
+
+    Uri url;
+
+    if (lat != null && lng != null && lat.toString() != 'null' && lng.toString() != 'null') {
+      url = Uri.parse('https://www.google.com/maps/search/?api=1&query=$lat,$lng');
+    }
+    else if (address.toString().trim().isNotEmpty) {
+      final encodedAddress = Uri.encodeComponent(address);
+      url = Uri.parse('https://www.google.com/maps/search/?api=1&query=$encodedAddress');
+    }
+    else {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('No location or address provided for this order.'), backgroundColor: Colors.red),
+        );
+      }
+      return;
+    }
+
+    try {
+      await launchUrl(url, mode: LaunchMode.externalApplication);
+    } catch (e) {
+      debugPrint('Could not launch maps: $e');
+    }
   }
 
   Future<void> _fetchOrders() async {
@@ -178,14 +237,12 @@ class _RiderDashboardState extends State<RiderDashboard> with WidgetsBindingObse
 
       if (mounted) {
         setState(() {
-          // STRICT LOGIC: Active Orders include pickup flow up to 'dropped' and delivery flow at 'out_for_delivery'
           _activeOrders = allOrders.where((o) {
             bool isMyPickup = o['pickup_rider_id'] == _riderId && ['assign_pickup', 'picked_up', 'dropped'].contains(o['status']);
             bool isMyDelivery = o['delivery_rider_id'] == _riderId && o['status'] == 'out_for_delivery';
             return isMyPickup || isMyDelivery;
           }).toList();
 
-          // STRICT LOGIC: History Orders include finished pickup flows and finished delivery flows
           _historyOrders = allOrders.where((o) {
             bool finishedPickup = o['pickup_rider_id'] == _riderId && !['pending', 'confirmed', 'assign_pickup', 'picked_up', 'dropped'].contains(o['status']);
             bool finishedDelivery = o['delivery_rider_id'] == _riderId && o['status'] == 'delivered';
@@ -217,27 +274,20 @@ class _RiderDashboardState extends State<RiderDashboard> with WidgetsBindingObse
     catch (e) { setState(() => _isOnline = !value); }
   }
 
-  // STRICT LOGIC: DB Status Updater with Atomic Cash Increment for Final Step
   Future<void> _updateOrderStatus(Map<String, dynamic> order, String newStatus, double progress) async {
     try {
       final now = DateTime.now();
 
-      // 1. Update the Order Status
       await supabase.from('orders').update({
         'status': newStatus,
         'progress': progress,
         'updated_at': now.toIso8601String()
       }).eq('id', order['id']);
 
-      // 2. The Final Handshake: Calculate and Push Cash Directly
       if (newStatus == 'delivered') {
         final orderPrice = (order['total_price'] as num?)?.toDouble() ?? 0.0;
-
-        // Grab the rider's current Total Due before adding the new cash
         final currentDue = (_riderProfile?['cash_in_hand'] as num?)?.toDouble() ?? 0.0;
 
-        // EXACT FIX: We ONLY update cash_in_hand (Total Due Amount).
-        // We completely ignore 'todays_cash' to prevent the Admin app from showing collected money early.
         await supabase.from('riders').update({
           'cash_in_hand': currentDue + orderPrice
         }).eq('id', _riderId);
@@ -326,7 +376,6 @@ class _RiderDashboardState extends State<RiderDashboard> with WidgetsBindingObse
     final themeColor = isDelivery ? _primaryBlue : const Color(0xFF8B5CF6);
     final profile = order['profiles'] as Map?;
 
-    // STRICT LOGIC: Dynamic Action Buttons for Handshake flow
     Widget actionButton;
     if (status == 'assign_pickup') {
       actionButton = ElevatedButton(onPressed: () => _updateOrderStatus(order, 'picked_up', 0.4), style: ElevatedButton.styleFrom(backgroundColor: themeColor, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14))), child: Text('Picked Up', style: GoogleFonts.alexandria(color: Colors.white, fontWeight: FontWeight.bold)));
