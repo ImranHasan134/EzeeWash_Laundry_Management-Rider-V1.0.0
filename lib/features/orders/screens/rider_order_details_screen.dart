@@ -8,55 +8,45 @@ class RiderOrderDetailsScreen extends StatelessWidget {
 
   const RiderOrderDetailsScreen({super.key, required this.order});
 
-  // Theme Colors
-  final Color _primaryBlue = const Color(0xFF3B82F6);
-  final Color _bgColor = const Color(0xFFF8FAFC);
-  final Color _textColor = const Color(0xFF1E293B);
-  final Color _subtextColor = const Color(0xFF64748B);
-
   Future<void> _callCustomer(String? phone) async {
     if (phone == null || phone.isEmpty || phone == 'No phone number') return;
     final Uri url = Uri.parse('tel:$phone');
-    try {
-      await launchUrl(url, mode: LaunchMode.externalApplication);
-    } catch (e) {
-      debugPrint('Could not launch phone dialer');
-    }
+    try { await launchUrl(url, mode: LaunchMode.externalApplication); }
+    catch (e) { debugPrint('Could not launch phone dialer'); }
   }
 
   Future<void> _openGoogleMaps(String? lat, String? lng, String? address) async {
     Uri url;
     if (lat != null && lng != null && lat != 'null' && lng != 'null') {
-      // Official Google Maps Intent for Coordinates
       url = Uri.parse('https://www.google.com/maps/search/?api=1&query=$lat,$lng');
     } else {
-      // Official Google Maps Intent for Address Search
       final encodedAddress = Uri.encodeComponent(address ?? '');
       url = Uri.parse('https://www.google.com/maps/search/?api=1&query=$encodedAddress');
     }
-
-    try {
-      await launchUrl(url, mode: LaunchMode.externalApplication);
-    } catch (e) {
-      debugPrint('Could not open Maps');
-    }
+    try { await launchUrl(url, mode: LaunchMode.externalApplication); }
+    catch (e) { debugPrint('Could not open Maps'); }
   }
 
   @override
   Widget build(BuildContext context) {
+    // ─── DYNAMIC THEME COLORS ───
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final bgColor = isDark ? const Color(0xFF0F172A) : const Color(0xFFF8FAFC);
+    final cardColor = isDark ? const Color(0xFF1E293B) : Colors.white;
+    final textColor = isDark ? Colors.white : const Color(0xFF1E293B);
+    final subtextColor = isDark ? const Color(0xFF94A3B8) : const Color(0xFF64748B);
+    final borderColor = isDark ? const Color(0xFF334155) : const Color(0xFFE2E8F0);
+    final iconBgColor = isDark ? const Color(0xFF334155) : const Color(0xFFF1F5F9);
+    final primaryBlue = const Color(0xFF3B82F6);
+
     final profile = order['profiles'] as Map?;
     final status = order['status'] as String? ?? '';
     final isPickup = status == 'picked_up';
-    final themeColor = isPickup ? const Color(0xFF8B5CF6) : _primaryBlue;
+    final themeColor = isPickup ? const Color(0xFF8B5CF6) : primaryBlue;
 
-    // 1. Check if it's a manual order
     final isAdminOrder = order['is_manual'] == true;
-
-    // 2. Name Logic: Use manual entry first, then profile, then fallback
     final rawName = order['manual_customer_name'] ?? profile?['full_name'] ?? 'Guest Customer';
     final customerName = isAdminOrder ? '$rawName (Admin Order)' : rawName;
-
-    // 3. Phone Logic: Use manual phone column to match the Admin App's insert
     final customerPhone = order['manual_customer_phone'] ?? profile?['phone'] ?? 'No phone number';
 
     final address = order['pickup_address'] ?? 'No address provided';
@@ -66,45 +56,46 @@ class RiderOrderDetailsScreen extends StatelessWidget {
     final specialInstructions = order['special_instructions'] ?? 'None';
 
     return Scaffold(
-      backgroundColor: _bgColor,
+      backgroundColor: bgColor,
       appBar: AppBar(
-        backgroundColor: Colors.white,
+        backgroundColor: cardColor,
         elevation: 0,
-        iconTheme: IconThemeData(color: _textColor),
+        scrolledUnderElevation: 0,
+        iconTheme: IconThemeData(color: textColor),
         title: Text('Order #${order['order_number'] ?? '000'}',
-            style: GoogleFonts.alexandria(color: _textColor, fontWeight: FontWeight.bold, fontSize: 18)),
+            style: GoogleFonts.alexandria(color: textColor, fontWeight: FontWeight.bold, fontSize: 18)),
       ),
       body: SingleChildScrollView(
-        padding: const EdgeInsets.all(20),
+        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 24),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             // --- CUSTOMER INFO CARD ---
-            Text('Customer Details', style: GoogleFonts.alexandria(fontSize: 14, fontWeight: FontWeight.bold, color: _subtextColor)),
-            const SizedBox(height: 12),
+            Text('Customer Details', style: GoogleFonts.alexandria(fontSize: 15, fontWeight: FontWeight.bold, color: subtextColor)),
+            const SizedBox(height: 16),
             Container(
-              padding: const EdgeInsets.all(20),
+              padding: const EdgeInsets.all(24),
               decoration: BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.circular(16),
-                  border: Border.all(color: Colors.grey.shade200),
-                  boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.02), blurRadius: 10)]
+                  color: cardColor,
+                  borderRadius: BorderRadius.circular(24),
+                  border: Border.all(color: borderColor),
+                  boxShadow: [BoxShadow(color: Colors.black.withOpacity(isDark ? 0.2 : 0.03), blurRadius: 20, offset: const Offset(0, 8))]
               ),
               child: Row(
                 children: [
                   Container(
-                    padding: const EdgeInsets.all(12),
-                    decoration: BoxDecoration(color: themeColor.withOpacity(0.1), shape: BoxShape.circle),
-                    child: Icon(Icons.person, color: themeColor),
+                    padding: const EdgeInsets.all(14),
+                    decoration: BoxDecoration(color: themeColor.withOpacity(0.15), borderRadius: BorderRadius.circular(16)),
+                    child: Icon(Icons.person_rounded, color: themeColor),
                   ),
                   const SizedBox(width: 16),
                   Expanded(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text(customerName, style: GoogleFonts.alexandria(fontSize: 16, fontWeight: FontWeight.bold, color: _textColor)),
-                        const SizedBox(height: 4),
-                        Text(customerPhone, style: GoogleFonts.alexandria(fontSize: 14, color: _subtextColor)),
+                        Text(customerName, style: GoogleFonts.alexandria(fontSize: 17, fontWeight: FontWeight.bold, color: textColor)),
+                        const SizedBox(height: 6),
+                        Text(customerPhone, style: GoogleFonts.alexandria(fontSize: 14, color: subtextColor, fontWeight: FontWeight.w500)),
                       ],
                     ),
                   ),
@@ -112,22 +103,23 @@ class RiderOrderDetailsScreen extends StatelessWidget {
                     onPressed: () => _callCustomer(customerPhone),
                     icon: const Icon(Icons.phone_in_talk_rounded, color: Colors.green),
                     style: IconButton.styleFrom(
-                        backgroundColor: Colors.green.withOpacity(0.1),
-                        padding: const EdgeInsets.all(12)
+                        backgroundColor: Colors.green.withOpacity(0.15),
+                        padding: const EdgeInsets.all(14),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16))
                     ),
                   )
                 ],
               ),
             ),
 
-            const SizedBox(height: 24),
+            const SizedBox(height: 32),
 
             // --- LOCATION CARD ---
-            Text('Location', style: GoogleFonts.alexandria(fontSize: 14, fontWeight: FontWeight.bold, color: _subtextColor)),
-            const SizedBox(height: 12),
+            Text('Location', style: GoogleFonts.alexandria(fontSize: 15, fontWeight: FontWeight.bold, color: subtextColor)),
+            const SizedBox(height: 16),
             Container(
-              padding: const EdgeInsets.all(20),
-              decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(16), border: Border.all(color: Colors.grey.shade200)),
+              padding: const EdgeInsets.all(24),
+              decoration: BoxDecoration(color: cardColor, borderRadius: BorderRadius.circular(24), border: Border.all(color: borderColor), boxShadow: [BoxShadow(color: Colors.black.withOpacity(isDark ? 0.2 : 0.03), blurRadius: 20, offset: const Offset(0, 8))]),
               child: Row(
                 children: [
                   Expanded(
@@ -136,13 +128,13 @@ class RiderOrderDetailsScreen extends StatelessWidget {
                       children: [
                         Row(
                           children: [
-                            Icon(Icons.location_on_rounded, size: 16, color: Colors.grey.shade400),
+                            Icon(Icons.location_on_rounded, size: 18, color: isDark ? Colors.grey.shade400 : Colors.grey.shade500),
                             const SizedBox(width: 8),
-                            Text('Pickup / Delivery Address', style: GoogleFonts.alexandria(fontSize: 12, fontWeight: FontWeight.w600, color: _subtextColor)),
+                            Text('Pickup / Delivery Address', style: GoogleFonts.alexandria(fontSize: 13, fontWeight: FontWeight.w600, color: subtextColor)),
                           ],
                         ),
-                        const SizedBox(height: 8),
-                        Text(address, style: GoogleFonts.alexandria(fontSize: 15, color: _textColor, height: 1.4)),
+                        const SizedBox(height: 12),
+                        Text(address, style: GoogleFonts.alexandria(fontSize: 16, color: textColor, height: 1.5, fontWeight: FontWeight.w500)),
                       ],
                     ),
                   ),
@@ -150,38 +142,53 @@ class RiderOrderDetailsScreen extends StatelessWidget {
                   IconButton(
                     onPressed: () => _openGoogleMaps(lat, lng, address),
                     icon: Icon(Icons.navigation_rounded, color: themeColor),
-                    style: IconButton.styleFrom(backgroundColor: themeColor.withOpacity(0.1)),
+                    style: IconButton.styleFrom(
+                        backgroundColor: themeColor.withOpacity(0.15),
+                        padding: const EdgeInsets.all(14),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16))
+                    ),
                   )
                 ],
               ),
             ),
 
-            const SizedBox(height: 24),
+            const SizedBox(height: 32),
 
             // --- ORDER SUMMARY CARD ---
-            Text('Order Summary', style: GoogleFonts.alexandria(fontSize: 14, fontWeight: FontWeight.bold, color: _subtextColor)),
-            const SizedBox(height: 12),
+            Text('Order Summary', style: GoogleFonts.alexandria(fontSize: 15, fontWeight: FontWeight.bold, color: subtextColor)),
+            const SizedBox(height: 16),
             Container(
-              padding: const EdgeInsets.all(20),
-              decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(16), border: Border.all(color: Colors.grey.shade200)),
+              padding: const EdgeInsets.all(24),
+              decoration: BoxDecoration(color: cardColor, borderRadius: BorderRadius.circular(24), border: Border.all(color: borderColor), boxShadow: [BoxShadow(color: Colors.black.withOpacity(isDark ? 0.2 : 0.03), blurRadius: 20, offset: const Offset(0, 8))]),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      Text('Cash to Collect', style: GoogleFonts.alexandria(fontSize: 15, fontWeight: FontWeight.w600, color: _textColor)),
-                      Text('৳$totalPrice', style: GoogleFonts.alexandria(fontSize: 20, fontWeight: FontWeight.bold, color: Colors.green.shade600)),
+                      Text('Cash to Collect', style: GoogleFonts.alexandria(fontSize: 16, fontWeight: FontWeight.w600, color: textColor)),
+                      Text('৳$totalPrice', style: GoogleFonts.alexandria(fontSize: 24, fontWeight: FontWeight.bold, color: Colors.green.shade600)),
                     ],
                   ),
-                  const Padding(padding: EdgeInsets.symmetric(vertical: 16), child: Divider(height: 1, color: Color(0xFFF1F5F9))),
-                  Text('Special Instructions:', style: GoogleFonts.alexandria(fontSize: 12, fontWeight: FontWeight.w600, color: _subtextColor)),
-                  const SizedBox(height: 8),
-                  Text(specialInstructions, style: GoogleFonts.alexandria(fontSize: 14, color: _textColor, fontStyle: FontStyle.italic)),
+                  Padding(padding: const EdgeInsets.symmetric(vertical: 20), child: Divider(height: 1, color: borderColor)),
+                  Row(
+                    children: [
+                      Icon(Icons.info_outline_rounded, size: 18, color: isDark ? Colors.amber.shade400 : Colors.orange),
+                      const SizedBox(width: 8),
+                      Text('Special Instructions', style: GoogleFonts.alexandria(fontSize: 13, fontWeight: FontWeight.w600, color: subtextColor)),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(color: iconBgColor, borderRadius: BorderRadius.circular(16)),
+                    child: Text(specialInstructions, style: GoogleFonts.alexandria(fontSize: 15, color: textColor, fontStyle: FontStyle.italic, height: 1.4)),
+                  ),
                 ],
               ),
             ),
-            const SizedBox(height: 100), // Space to ensure content isn't hidden by slider
+            const SizedBox(height: 100),
           ],
         ),
       ),
