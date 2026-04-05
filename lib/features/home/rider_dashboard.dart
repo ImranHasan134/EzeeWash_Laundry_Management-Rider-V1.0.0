@@ -281,9 +281,20 @@ class _RiderDashboardState extends State<RiderDashboard> with WidgetsBindingObse
     try {
       final now = DateTime.now();
 
-      await supabase.from('orders').update({
-        'status': newStatus, 'progress': progress, 'updated_at': now.toIso8601String()
-      }).eq('id', order['id']);
+      // 1. Prepare the standard update data
+      Map<String, dynamic> updateData = {
+        'status': newStatus,
+        'progress': progress,
+        'updated_at': now.toIso8601String()
+      };
+
+      // 2. THE FIX: If marking delivered and it's COD, also mark it as paid!
+      if (newStatus == 'delivered' && order['payment_method'] == 'cash_on_delivery') {
+        updateData['payment_status'] = 'paid';
+      }
+
+      // 3. Send the single update to Supabase
+      await supabase.from('orders').update(updateData).eq('id', order['id']);
 
       if (newStatus == 'delivered') {
         final orderPrice = (order['total_price'] as num?)?.toDouble() ?? 0.0;
@@ -292,9 +303,10 @@ class _RiderDashboardState extends State<RiderDashboard> with WidgetsBindingObse
         await _fetchRiderProfile();
       }
       await _fetchOrders();
-    } catch (e) { debugPrint("Error updating status: $e"); }
+    } catch (e) {
+      debugPrint("Error updating status: $e");
+    }
   }
-
   Future<void> _logout() async {
     _stopLocationTracking();
     if (_riderId.isNotEmpty) await supabase.from('riders').update({'is_online': false}).eq('id', _riderId);
