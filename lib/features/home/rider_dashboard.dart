@@ -1,3 +1,4 @@
+// lib/features/home/rider_dashboard.dart
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
@@ -187,6 +188,31 @@ class _RiderDashboardState extends State<RiderDashboard> with WidgetsBindingObse
   Future<void> _fetchRiderProfile() async {
     try {
       final data = await supabase.from('riders').select().eq('id', _riderId).single();
+
+      // --- NEW: Security Gatekeeper for Password Changes ---
+      final prefs = await SharedPreferences.getInstance();
+      final localPassword = prefs.getString('rider_password');
+
+      if (data['password'] != null && localPassword != null && data['password'] != localPassword) {
+        // Admin changed the password! Force logout instantly.
+        _stopLocationTracking();
+        await supabase.from('riders').update({'is_online': false}).eq('id', _riderId);
+        await prefs.clear();
+
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('Password changed, contact with authority', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                backgroundColor: Colors.red,
+                duration: Duration(seconds: 5),
+              )
+          );
+          Navigator.pushAndRemoveUntil(context, MaterialPageRoute(builder: (_) => const RiderLoginScreen()), (_) => false);
+        }
+        return; // Abort further execution
+      }
+      // -----------------------------------------------------
+
       if (mounted) {
         setState(() {
           _riderProfile = data;
@@ -236,17 +262,38 @@ class _RiderDashboardState extends State<RiderDashboard> with WidgetsBindingObse
           .or('pickup_rider_id.eq.$_riderId,delivery_rider_id.eq.$_riderId')
           .order('updated_at', ascending: false);
 
+      // --- NEW: Fetch ratings for this specific rider ---
+      final ratingsRes = await supabase
+          .from('rider_ratings')
+          .select('order_id, stars')
+          .eq('rider_id', _riderId);
+
+      final ratingsList = List<Map<String, dynamic>>.from(ratingsRes);
+      // ------------------------------------------------
+
       final allOrders = List<Map<String, dynamic>>.from(data);
+
+      // --- NEW: Merge ratings into the order data ---
+      List<Map<String, dynamic>> mergedOrders = [];
+      for (var o in allOrders) {
+        var ratingData = ratingsList.where((r) => r['order_id'] == o['id']).toList();
+        double stars = 0.0;
+        if (ratingData.isNotEmpty) {
+          stars = ratingData.map((e) => (e['stars'] as num).toDouble()).reduce((a, b) => a + b) / ratingData.length;
+        }
+        mergedOrders.add({...o, 'stars': stars});
+      }
+      // ----------------------------------------------
 
       if (mounted) {
         setState(() {
-          _activeOrders = allOrders.where((o) {
+          _activeOrders = mergedOrders.where((o) {
             bool isMyPickup = o['pickup_rider_id'] == _riderId && ['assign_pickup', 'picked_up', 'dropped'].contains(o['status']);
             bool isMyDelivery = o['delivery_rider_id'] == _riderId && o['status'] == 'out_for_delivery';
             return isMyPickup || isMyDelivery;
           }).toList();
 
-          _historyOrders = allOrders.where((o) {
+          _historyOrders = mergedOrders.where((o) {
             bool finishedPickup = o['pickup_rider_id'] == _riderId && !['pending', 'confirmed', 'assign_pickup', 'picked_up', 'dropped'].contains(o['status']);
             bool finishedDelivery = o['delivery_rider_id'] == _riderId && o['status'] == 'delivered';
             return finishedPickup || finishedDelivery;
@@ -272,28 +319,43 @@ class _RiderDashboardState extends State<RiderDashboard> with WidgetsBindingObse
   }
 
   Future<void> _toggleOnlineStatus(bool value) async {
+    if (_riderProfile?['is_active'] == false) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+                'You are marked inactive please contact to the authority',
+                style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)
+            ),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+      return;
+    }
+
     setState(() => _isOnline = value);
-    try { await supabase.from('riders').update({'is_online': value}).eq('id', _riderId); }
-    catch (e) { setState(() => _isOnline = !value); }
+    try {
+      await supabase.from('riders').update({'is_online': value}).eq('id', _riderId);
+    } catch (e) {
+      setState(() => _isOnline = !value);
+    }
   }
 
   Future<void> _updateOrderStatus(Map<String, dynamic> order, String newStatus, double progress) async {
     try {
       final now = DateTime.now();
 
-      // 1. Prepare the standard update data
       Map<String, dynamic> updateData = {
         'status': newStatus,
         'progress': progress,
         'updated_at': now.toIso8601String()
       };
 
-      // 2. THE FIX: If marking delivered and it's COD, also mark it as paid!
       if (newStatus == 'delivered' && order['payment_method'] == 'cash_on_delivery') {
         updateData['payment_status'] = 'paid';
       }
 
-      // 3. Send the single update to Supabase
       await supabase.from('orders').update(updateData).eq('id', order['id']);
 
       if (newStatus == 'delivered') {
@@ -307,6 +369,7 @@ class _RiderDashboardState extends State<RiderDashboard> with WidgetsBindingObse
       debugPrint("Error updating status: $e");
     }
   }
+
   Future<void> _logout() async {
     _stopLocationTracking();
     if (_riderId.isNotEmpty) await supabase.from('riders').update({'is_online': false}).eq('id', _riderId);
@@ -356,7 +419,7 @@ class _RiderDashboardState extends State<RiderDashboard> with WidgetsBindingObse
               selectedLabelStyle: GoogleFonts.alexandria(fontSize: 12, fontWeight: FontWeight.bold), unselectedLabelStyle: GoogleFonts.alexandria(fontSize: 12, fontWeight: FontWeight.w600),
               type: BottomNavigationBarType.fixed,
               items: const [
-                BottomNavigationBarItem(icon: Padding(padding: EdgeInsets.only(bottom: 6), child: Icon(Icons.two_wheeler_rounded, size: 24)), label: 'Tasks'),
+                BottomNavigationBarItem(icon: Padding(padding: EdgeInsets.only(bottom: 6), child: Icon(Icons.fire_truck_sharp, size: 24)), label: 'Tasks'),
                 BottomNavigationBarItem(icon: Padding(padding: EdgeInsets.only(bottom: 6), child: Icon(Icons.receipt_long_rounded, size: 24)), label: 'History'),
                 BottomNavigationBarItem(icon: Padding(padding: EdgeInsets.only(bottom: 6), child: Icon(Icons.person_outline_rounded, size: 24)), label: 'Profile'),
               ],
@@ -367,7 +430,6 @@ class _RiderDashboardState extends State<RiderDashboard> with WidgetsBindingObse
     );
   }
 
-  // --- MODERN THEME SWITCH UI ---
   Widget _buildThemeToggle() {
     return GestureDetector(
       onTap: _toggleTheme,
@@ -466,15 +528,45 @@ class _RiderDashboardState extends State<RiderDashboard> with WidgetsBindingObse
       ),
     );
   }
-
   Widget _buildProfileTab() {
     final name = _riderProfile?['full_name'] ?? 'Rider';
     final cash = (_riderProfile?['cash_in_hand'] as num?)?.toDouble() ?? 0.0;
     final avatar = _riderProfile?['avatar_url'] as String?;
+
+    // --- NEW: Safely extract the rating ---
+    final rating = (_riderProfile?['rating'] as num?)?.toDouble() ?? 5.0;
+
     return SingleChildScrollView(padding: const EdgeInsets.all(24), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       Container(width: double.infinity, padding: const EdgeInsets.all(32), decoration: BoxDecoration(color: _cardColor, borderRadius: BorderRadius.circular(32), border: Border.all(color: _borderColor), boxShadow: [BoxShadow(color: Colors.black.withOpacity(_isDarkMode ? 0.2 : 0.03), blurRadius: 24, offset: const Offset(0, 10))]), child: Column(children: [
         Container(decoration: BoxDecoration(shape: BoxShape.circle, boxShadow: [BoxShadow(color: _primaryBlue.withOpacity(0.2), blurRadius: 20, offset: const Offset(0, 8))]), child: CircleAvatar(radius: 50, backgroundColor: _primaryBlue.withOpacity(0.1), backgroundImage: (avatar != null && avatar.isNotEmpty) ? NetworkImage(avatar) : null, child: avatar == null ? Text(name[0].toUpperCase(), style: GoogleFonts.alexandria(fontSize: 36, fontWeight: FontWeight.bold, color: _primaryBlue)) : null)),
-        const SizedBox(height: 20), Text(name, style: GoogleFonts.alexandria(fontSize: 24, fontWeight: FontWeight.w800, color: _textColor)), const SizedBox(height: 4), Text(_riderProfile?['phone'] ?? '', style: GoogleFonts.alexandria(fontSize: 15, color: _subtextColor))
+        const SizedBox(height: 20),
+        Text(name, style: GoogleFonts.alexandria(fontSize: 24, fontWeight: FontWeight.w800, color: _textColor)),
+        const SizedBox(height: 4),
+        Text(_riderProfile?['phone'] ?? '', style: GoogleFonts.alexandria(fontSize: 15, color: _subtextColor)),
+
+        // --- NEW: Highlighted Rating Badge ---
+        const SizedBox(height: 16),
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          decoration: BoxDecoration(
+            color: Colors.amber.withOpacity(0.15),
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(color: Colors.amber.withOpacity(0.3)),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.star_rounded, color: Colors.amber, size: 20),
+              const SizedBox(width: 8),
+              Text(
+                  '${rating.toStringAsFixed(1)} Rating',
+                  style: GoogleFonts.alexandria(fontSize: 14, fontWeight: FontWeight.bold, color: Colors.amber)
+              ),
+            ],
+          ),
+        ),
+        // -------------------------------------
+
       ])),
       const SizedBox(height: 24),
       Row(children: [
@@ -514,6 +606,55 @@ class _RiderDashboardState extends State<RiderDashboard> with WidgetsBindingObse
     bool picked = order['pickup_rider_id'] == _riderId;
     bool deliv = order['delivery_rider_id'] == _riderId;
     String label = status == 'delivered' ? (picked && deliv ? 'ROUND TRIP' : picked ? 'PICKUP ONLY' : 'DELIVERY ONLY') : status.toUpperCase();
-    return Container(padding: const EdgeInsets.all(20), decoration: BoxDecoration(color: _cardColor, borderRadius: BorderRadius.circular(20), border: Border.all(color: _borderColor), boxShadow: [BoxShadow(color: Colors.black.withOpacity(_isDarkMode ? 0.2 : 0.02), blurRadius: 10, offset: const Offset(0, 4))]), child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text('#${order['order_number']}', style: GoogleFonts.alexandria(fontSize: 16, fontWeight: FontWeight.bold, color: _textColor)), const SizedBox(height: 4), Container(padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4), decoration: ShapeDecoration(shape: const StadiumBorder(), color: _primaryBlue.withOpacity(0.1)), child: Text(label, style: GoogleFonts.alexandria(fontSize: 10, fontWeight: FontWeight.bold, color: _primaryBlue)))]), Text('৳${order['total_price']}', style: GoogleFonts.alexandria(fontSize: 18, fontWeight: FontWeight.bold, color: _textColor))]));
+
+    // --- NEW: Extract stars ---
+    double stars = order['stars'] ?? 0.0;
+
+    return Container(
+        padding: const EdgeInsets.all(20),
+        decoration: BoxDecoration(
+            color: _cardColor,
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(color: _borderColor),
+            boxShadow: [BoxShadow(color: Colors.black.withOpacity(_isDarkMode ? 0.2 : 0.02), blurRadius: 10, offset: const Offset(0, 4))]
+        ),
+        child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('#${order['order_number']}', style: GoogleFonts.alexandria(fontSize: 16, fontWeight: FontWeight.bold, color: _textColor)),
+                    const SizedBox(height: 8),
+                    Row(
+                        children: [
+                          Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                              decoration: ShapeDecoration(shape: const StadiumBorder(), color: _primaryBlue.withOpacity(0.1)),
+                              child: Text(label, style: GoogleFonts.alexandria(fontSize: 10, fontWeight: FontWeight.bold, color: _primaryBlue))
+                          ),
+
+                          // --- NEW: Display Star Rating visually ---
+                          if (status == 'delivered') ...[
+                            const SizedBox(width: 10),
+                            if (stars > 0)
+                              Row(children: [
+                                const Icon(Icons.star_rounded, color: Colors.amber, size: 14),
+                                const SizedBox(width: 4),
+                                Text(stars.toStringAsFixed(1), style: GoogleFonts.alexandria(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.amber))
+                              ])
+                            else
+                              Text('No Rating', style: GoogleFonts.alexandria(fontSize: 11, color: _subtextColor, fontWeight: FontWeight.w500)),
+                          ]
+                          // -----------------------------------------
+
+                        ]
+                    )
+                  ]
+              ),
+              Text('৳${((order['total_price'] as num?)?.toDouble() ?? 0).toStringAsFixed(0)}', style: GoogleFonts.alexandria(fontSize: 18, fontWeight: FontWeight.bold, color: _textColor))
+            ]
+        )
+    );
   }
 }

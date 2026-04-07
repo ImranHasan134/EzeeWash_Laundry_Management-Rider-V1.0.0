@@ -13,13 +13,17 @@ class RiderLoginScreen extends StatefulWidget {
 
 class _RiderLoginScreenState extends State<RiderLoginScreen> {
   final _phoneCtrl = TextEditingController();
+  final _passwordCtrl = TextEditingController();
   bool _loading = false;
+  bool _obscurePassword = true; // --- NEW: Toggle State ---
   String? _error;
 
   Future<void> _handleLogin() async {
     final phone = _phoneCtrl.text.trim();
-    if (phone.isEmpty) {
-      setState(() => _error = 'Please enter your phone number');
+    final password = _passwordCtrl.text.trim();
+
+    if (phone.isEmpty || password.isEmpty) {
+      setState(() => _error = 'Please enter both phone number and password');
       return;
     }
 
@@ -30,12 +34,13 @@ class _RiderLoginScreenState extends State<RiderLoginScreen> {
           .from('riders')
           .select()
           .eq('phone', phone)
+          .eq('password', password)
           .eq('is_active', true)
           .maybeSingle();
 
       if (data == null) {
         setState(() {
-          _error = 'Number not found or account is inactive. Contact Admin.';
+          _error = 'Invalid credentials or inactive account. Contact Admin.';
           _loading = false;
         });
         return;
@@ -44,6 +49,7 @@ class _RiderLoginScreenState extends State<RiderLoginScreen> {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString('rider_id', data['id'].toString());
       await prefs.setString('rider_name', data['full_name']);
+      await prefs.setString('rider_password', password);
 
       OneSignal.login(data['id'].toString());
 
@@ -72,7 +78,6 @@ class _RiderLoginScreenState extends State<RiderLoginScreen> {
         child: SingleChildScrollView(
           padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 24),
           child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-            // Modern Floating Icon
             Container(
               padding: const EdgeInsets.all(24),
               decoration: BoxDecoration(
@@ -105,29 +110,51 @@ class _RiderLoginScreenState extends State<RiderLoginScreen> {
               const SizedBox(height: 24),
             ],
 
-            // Input Field
             Container(
               decoration: BoxDecoration(
                   color: cardColor,
                   borderRadius: BorderRadius.circular(16),
                   boxShadow: [BoxShadow(color: Colors.black.withOpacity(isDark ? 0.2 : 0.04), blurRadius: 20, offset: const Offset(0, 8))]
               ),
-              child: TextField(
-                controller: _phoneCtrl,
-                keyboardType: TextInputType.phone,
-                style: GoogleFonts.alexandria(fontSize: 16, fontWeight: FontWeight.bold, color: textColor),
-                decoration: InputDecoration(
-                  hintText: '+8801XXXXXXXXX',
-                  hintStyle: GoogleFonts.alexandria(color: subtextColor.withOpacity(0.5), fontWeight: FontWeight.normal),
-                  prefixIcon: Icon(Icons.phone_android_rounded, color: subtextColor),
-                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(16), borderSide: BorderSide.none),
-                  contentPadding: const EdgeInsets.symmetric(horizontal: 24, vertical: 20),
-                ),
+              child: Column(
+                children: [
+                  TextField(
+                    controller: _phoneCtrl,
+                    keyboardType: TextInputType.phone,
+                    style: GoogleFonts.alexandria(fontSize: 16, fontWeight: FontWeight.bold, color: textColor),
+                    decoration: InputDecoration(
+                      hintText: '+8801XXXXXXXXX',
+                      hintStyle: GoogleFonts.alexandria(color: subtextColor.withOpacity(0.5), fontWeight: FontWeight.normal),
+                      prefixIcon: Icon(Icons.phone_android_rounded, color: subtextColor),
+                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(16), borderSide: BorderSide.none),
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 24, vertical: 20),
+                    ),
+                  ),
+                  Divider(height: 1, color: isDark ? const Color(0xFF334155) : const Color(0xFFE2E8F0)),
+                  TextField(
+                    controller: _passwordCtrl,
+                    obscureText: _obscurePassword, // --- NEW: Controlled visibility ---
+                    style: GoogleFonts.alexandria(fontSize: 16, fontWeight: FontWeight.bold, color: textColor),
+                    decoration: InputDecoration(
+                      hintText: 'Password',
+                      hintStyle: GoogleFonts.alexandria(color: subtextColor.withOpacity(0.5), fontWeight: FontWeight.normal),
+                      prefixIcon: Icon(Icons.lock_outline_rounded, color: subtextColor),
+
+                      // --- NEW: Eye Icon Button ---
+                      suffixIcon: IconButton(
+                        icon: Icon(_obscurePassword ? Icons.visibility_off_rounded : Icons.visibility_rounded, color: subtextColor),
+                        onPressed: () => setState(() => _obscurePassword = !_obscurePassword),
+                      ),
+
+                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(16), borderSide: BorderSide.none),
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 24, vertical: 20),
+                    ),
+                  ),
+                ],
               ),
             ),
             const SizedBox(height: 32),
 
-            // Modern Gradient Button
             Container(
               width: double.infinity,
               height: 60,
