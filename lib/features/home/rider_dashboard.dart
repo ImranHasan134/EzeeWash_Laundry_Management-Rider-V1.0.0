@@ -402,7 +402,27 @@ class _RiderDashboardState extends State<RiderDashboard> with WidgetsBindingObse
           const SizedBox(width: 8)
         ],
       ),
-      body: pages[_currentIndex],
+      body: AnimatedSwitcher(
+        duration: const Duration(milliseconds: 300),
+        switchInCurve: Curves.easeOutQuart,
+        switchOutCurve: Curves.easeInQuart,
+        transitionBuilder: (Widget child, Animation<double> animation) {
+          return FadeTransition(
+            opacity: animation,
+            child: SlideTransition(
+              position: Tween<Offset>(
+                begin: const Offset(0.0, 0.05), // A slight upward glide
+                end: Offset.zero,
+              ).animate(animation),
+              child: child,
+            ),
+          );
+        },
+        child: Container(
+          key: ValueKey<int>(_currentIndex), // The key tells Flutter to animate when the index changes
+          child: pages[_currentIndex],
+        ),
+      ),
       bottomNavigationBar: Container(
         decoration: BoxDecoration(
           color: _bottomNavBg,
@@ -413,16 +433,24 @@ class _RiderDashboardState extends State<RiderDashboard> with WidgetsBindingObse
           borderRadius: const BorderRadius.vertical(top: Radius.circular(30)),
           child: SafeArea(child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-            child: BottomNavigationBar(
-              currentIndex: _currentIndex, onTap: (i) => setState(() => _currentIndex = i),
-              backgroundColor: _bottomNavBg, elevation: 0, selectedItemColor: _primaryBlue, unselectedItemColor: _unselectedIconColor,
-              selectedLabelStyle: GoogleFonts.alexandria(fontSize: 12, fontWeight: FontWeight.bold), unselectedLabelStyle: GoogleFonts.alexandria(fontSize: 12, fontWeight: FontWeight.w600),
-              type: BottomNavigationBarType.fixed,
-              items: const [
-                BottomNavigationBarItem(icon: Padding(padding: EdgeInsets.only(bottom: 6), child: Icon(Icons.fire_truck_sharp, size: 24)), label: 'Tasks'),
-                BottomNavigationBarItem(icon: Padding(padding: EdgeInsets.only(bottom: 6), child: Icon(Icons.receipt_long_rounded, size: 24)), label: 'History'),
-                BottomNavigationBarItem(icon: Padding(padding: EdgeInsets.only(bottom: 6), child: Icon(Icons.person_outline_rounded, size: 24)), label: 'Profile'),
-              ],
+
+            // --- NEW: Theme wrapper to remove the ugly square ripple ---
+            child: Theme(
+              data: Theme.of(context).copyWith(
+                splashColor: Colors.transparent,
+                highlightColor: Colors.transparent,
+              ),
+              child: BottomNavigationBar(
+                currentIndex: _currentIndex, onTap: (i) => setState(() => _currentIndex = i),
+                backgroundColor: _bottomNavBg, elevation: 0, selectedItemColor: _primaryBlue, unselectedItemColor: _unselectedIconColor,
+                selectedLabelStyle: GoogleFonts.alexandria(fontSize: 12, fontWeight: FontWeight.bold), unselectedLabelStyle: GoogleFonts.alexandria(fontSize: 12, fontWeight: FontWeight.w600),
+                type: BottomNavigationBarType.fixed,
+                items: const [
+                  BottomNavigationBarItem(icon: Padding(padding: EdgeInsets.only(bottom: 6), child: Icon(Icons.two_wheeler_rounded, size: 24)), label: 'Tasks'),
+                  BottomNavigationBarItem(icon: Padding(padding: EdgeInsets.only(bottom: 6), child: Icon(Icons.receipt_long_rounded, size: 24)), label: 'History'),
+                  BottomNavigationBarItem(icon: Padding(padding: EdgeInsets.only(bottom: 6), child: Icon(Icons.person_outline_rounded, size: 24)), label: 'Profile'),
+                ],
+              ),
             ),
           )),
         ),
