@@ -10,7 +10,7 @@ import 'package:onesignal_flutter/onesignal_flutter.dart';
 
 import '../../main.dart';
 import '../auth/rider_login_screen.dart';
-import '../orders/screens/rider_order_details_screen.dart';
+import '../orders/rider_order_details_screen.dart';
 
 class RiderDashboard extends StatefulWidget {
   const RiderDashboard({super.key});
