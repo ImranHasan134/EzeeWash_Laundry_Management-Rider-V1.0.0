@@ -45,5 +45,4 @@ app.*.map.json
 /android/app/release
 
 
-# Keep API Keys secret
 lib/core/constants/api_keys.dart
