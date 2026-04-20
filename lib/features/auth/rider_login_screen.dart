@@ -23,7 +23,7 @@ class _RiderLoginScreenState extends State<RiderLoginScreen> {
     final password = _passwordCtrl.text.trim();
 
     if (phone.isEmpty || password.isEmpty) {
-      setState(() => _error = 'Please enter both phone number and password');
+      setState(() => _error = 'Please enter both of your phone number and provided password');
       return;
     }
 
