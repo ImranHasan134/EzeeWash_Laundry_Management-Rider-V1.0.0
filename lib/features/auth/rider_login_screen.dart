@@ -136,7 +136,7 @@ class _RiderLoginScreenState extends State<RiderLoginScreen> {
                     obscureText: _obscurePassword, // --- NEW: Controlled visibility ---
                     style: GoogleFonts.alexandria(fontSize: 16, fontWeight: FontWeight.bold, color: textColor),
                     decoration: InputDecoration(
-                      hintText: 'Password',
+                      hintText: 'Enter Your Password',
                       hintStyle: GoogleFonts.alexandria(color: subtextColor.withOpacity(0.5), fontWeight: FontWeight.normal),
                       prefixIcon: Icon(Icons.lock_outline_rounded, color: subtextColor),
 
