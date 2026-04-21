@@ -8,6 +8,7 @@ environment:
   sdk: ^3.11.1
 
 dependencies:
+  slide_to_act: ^2.0.2
   flutter:
     sdk: flutter
   cupertino_icons: ^1.0.8
