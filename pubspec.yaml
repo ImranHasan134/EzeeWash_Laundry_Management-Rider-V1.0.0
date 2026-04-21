@@ -49,15 +49,6 @@ flutter_icons:
   adaptive_icon_background: "#ffffff"
   adaptive_icon_foreground: "assets/icon/rider_logo.png"
 
-flutter_native_splash:
-  color: "#ffffff"
-  image: "assets/icon/rider_logo.png"
-  fullscreen: true
-  android_12:
-    color: "#ffffff"
-    icon_background_color: "#ffffff"
-    image: "assets/icon/rider_logo.png"
-
 flutter:
   uses-material-design: true
   assets:
