@@ -40,16 +40,20 @@ dev_dependencies:
     sdk: flutter
   flutter_lints: ^6.0.0
   flutter_launcher_icons: ^0.14.4
+  flutter_native_splash: ^2.3.1
 
-flutter_icons:
+flutter_launcher_icons:
   android: true
   ios: true
   image_path: "assets/icon/rider_logo.png"
-  adaptive_icon_background: "#ffffff"
+  adaptive_icon_background: "#0D0D14"
   adaptive_icon_foreground: "assets/icon/rider_logo.png"
+  remove_alpha_ios: true
+  web:
+    generate: false
 
 flutter:
   uses-material-design: true
+
   assets:
-    - assets/icon/rider_logo.png
-    - assets/icon/splash.gif
+    - assets/icon/
