@@ -1,3 +1,4 @@
+// lib/main.dart
 import 'core/constants/api_keys.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -8,8 +9,7 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:onesignal_flutter/onesignal_flutter.dart';
 
 // Import your features
-import 'features/auth/rider_login_screen.dart';
-import 'features/home/rider_dashboard.dart';
+import 'features/splash/splash_screen.dart'; // NEW: Imported the Splash Screen
 
 const String supabaseUrl = 'https://xxvicmprwtbxinuluyqx.supabase.co';
 const String supabaseAnonKey = 'sb_publishable_RGFSfrrMcY-uqQrFxNCNaw_Z6D6Jmo2';
@@ -74,7 +74,8 @@ class EzeeWashRiderApp extends StatelessWidget {
         scaffoldBackgroundColor: const Color(0xFF0F172A),
         useMaterial3: true,
       ),
-      home: isLoggedIn ? const RiderDashboard() : const RiderLoginScreen(),
+      // --- NEW: The Splash Screen is now the absolute first thing the app shows ---
+      home: SplashScreen(isLoggedIn: isLoggedIn),
     );
   }
 }
